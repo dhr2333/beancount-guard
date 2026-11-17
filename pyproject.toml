@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ledger-domain"
+version = "0.1.0"
+description = "Thin Beancount domain layer: alias metadata, reconciliation periods, reviewed drafts, validated atomic writes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+ledger-domain = "ledger_domain.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ledger_domain*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
