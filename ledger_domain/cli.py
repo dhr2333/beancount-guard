@@ -97,6 +97,8 @@ def _build_parser() -> argparse.ArgumentParser:
     get_draft = commands.add_parser("get-draft")
     get_draft.add_argument("draft_id")
     commands.add_parser("submit-draft")
+    commands.add_parser("update-draft")
+    commands.add_parser("account-open")
     commands.add_parser("approve-draft")
     commands.add_parser("reject-draft")
     commands.add_parser("quick-draft")
@@ -191,6 +193,35 @@ def _dispatch(args: argparse.Namespace, domain: LedgerDomain) -> Any:
     if command == "submit-draft":
         stored = domain.submit_draft(_read_payload())
         return {"draft": domain.project_draft(stored["draft"]), "deduplicated": stored["deduplicated"]}
+    if command == "update-draft":
+        payload = _read_payload()
+        draft_id = payload.get("id")
+        if not isinstance(draft_id, str):
+            fail("invalid_argument", "id is required")
+        fields = {key: value for key, value in payload.items() if key not in {"id", "actor"}}
+        updated = domain.update_draft(
+            draft_id=draft_id,
+            payload=fields,
+            actor="panel" if payload.get("actor") == "panel" else "user",
+        )
+        return {"draft": domain.project_draft(updated["draft"])}
+    if command == "account-open":
+        payload = _read_payload()
+        account = payload.get("account")
+        if not isinstance(account, str) or account.strip() == "":
+            fail("invalid_argument", "account is required")
+        currencies = payload.get("currencies")
+        if not isinstance(currencies, list):
+            currencies = [payload["currency"]] if isinstance(payload.get("currency"), str) else []
+        opened = domain.open_account(
+            account=account,
+            date_text=payload.get("date") if isinstance(payload.get("date"), str) else None,
+            currencies=[item for item in currencies if isinstance(item, str)],
+            alias=payload.get("alias") if isinstance(payload.get("alias"), str) else None,
+            reconcile=payload.get("reconcile") if isinstance(payload.get("reconcile"), str) else None,
+            actor="panel" if payload.get("actor") == "panel" else "user",
+        )
+        return {"account": _account_summary(opened)}
     if command == "approve-draft":
         payload = _read_payload()
         draft_id = payload.get("id")

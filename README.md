@@ -2,20 +2,28 @@
 
 Beancount 账本的**领域核心库**。它不包含界面、不启动服务、不依赖 DSH：UI、Agent 适配器、脚本都调用这一组 Python 函数，或通过同一份 JSON CLI 契约调用。
 
+## 写入目标
+
+- 交易：`trans/collect.bean`
+- 对账：`trans/reconciliation.bean`
+- `trans/main.bean` 只 include 上述两个文件，不写交易。
+- 不再按 `YYYY/MM.bean` 分月写入。
+- Core 负责整个账本写入；`init-ledger` 暂保留，MVP-0 从 `ledger-domain-assets` 已有账本开始。
+
 ## 三个独立项目
 
 | 项目 | 根目录 | 职责 |
 |---|---|---|
-| 核心库 | `~/桌面/GitHub/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
-| 账本源 | `~/桌面/GitHub/Assets` | 只存 `.bean`、单据和账本资源，不放代码 |
-| DSH 插件 | `~/桌面/GitHub/dsh-ledger-domain` | 只做展示页，通过 CLI 调本库，不含领域逻辑 |
+| 核心库 | `~/GitHub/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
+| 账本源 | `~/GitHub/ledger-domain-assets` | 只存 `.bean`、单据和账本资源，不放代码 |
+| DSH 插件 | `~/GitHub/dsh-ledger-domain` | 只做展示页，通过 CLI 调本库，不含领域逻辑 |
 
 ## 函数接口
 
 ```python
 from ledger_domain import create_ledger_domain
 
-ledger = create_ledger_domain(root="/home/daihaorui/桌面/GitHub/Assets")
+ledger = create_ledger_domain(root="/home/dhr2333/Documents/账本-mvp")
 
 ledger.setup()                                    # 是否已有 main.bean
 ledger.init_ledger(title="我的账本", currency="CNY")  # 生成新账本并 bean-check
@@ -24,6 +32,8 @@ ledger.list_accounts()
 ledger.get_due_reconciliations()
 ledger.set_account_metadata(account="Assets:...", alias="工行5244", reconcile="monthly")
 ledger.submit_balance(account="工行5244", amount="0.00", currency="CNY")
+ledger.open_account(account="Assets:Savings:Bank:Ningbo", currencies=["CNY"], alias="宁波银行", reconcile="monthly")
+ledger.update_draft(draft_id="draft-...", payload={"payee": "星巴克"})
 ledger.submit_draft({...})                        # 入队，不写账本
 ledger.approve_draft(draft_id="draft-...")        # 校验 → 原子追加
 ledger.query_transactions(date_from="2026-10-01", date_to="2026-10-31")
@@ -32,7 +42,9 @@ ledger.query_balances(as_of="2026-11-17")
 
 `LedgerError` 带 `code`、`message`、`details`；UI/CLI 直接展示 code 对应的本地化文案。
 
-## 新账本模板
+## 新账本模板（legacy，不在 MVP-0）
+
+> MVP-0 直接使用 `ledger-domain-assets`；初始化后续由 DSH 实现。以下 `init_ledger()` 是旧模板，保留但不在 MVP-0 验收。
 
 `init_ledger()` 使用 **Beancount-Trans-Assets 的目录约定和科目命名**，但只带一份干净的起步模板：
 
@@ -74,7 +86,7 @@ stdout 固定为：
 {"ok": false, "error": {"code": "...", "message": "...", "details": {}}}
 ```
 
-业务失败也返回退出码 0；用法/内部错误返回 1。命令：`health`、`setup`、`init`、`bootstrap`、`status`、`accounts`、`resolve`、`due`、`metadata`、`balance`、`list-drafts`、`get-draft`、`submit-draft`、`approve-draft`、`reject-draft`、`quick-draft`、`query-transactions`、`query-balances`、`validate`、`audit-metadata`。
+业务失败也返回退出码 0；用法/内部错误返回 1。命令：`health`、`setup`、`init`、`bootstrap`、`status`、`accounts`、`resolve`、`due`、`metadata`、`account-open`、`balance`、`list-drafts`、`get-draft`、`submit-draft`、`update-draft`、`approve-draft`、`reject-draft`、`quick-draft`、`query-transactions`、`query-balances`、`validate`、`audit-metadata`。
 
 ## 运行时
 
@@ -107,7 +119,8 @@ cd ~/桌面/GitHub/ledger-domain-core
 
 - `init_ledger()` 只写入空目录；非空目录返回 `directory_not_empty`，不会覆盖现有文件。
 - 导入已有账本（选择目录/校验/接管）还没有做；当前需要把插件 `root` 指向已有账本。
-- 只追加到 `YYYY/MM.bean`；年份目录或 `YYYY/00.bean` 不存在时拒绝写入。
+- 交易/对账只追加到 `trans/collect.bean` / `trans/reconciliation.bean`；文件不存在时报 `ledger_not_initialized`。
+- `init_ledger()` 仍是旧的 16 账户/月度模板；MVP-0 用 `ledger-domain-assets`，初始化后续由 DSH 实现。
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
 - `bean-check`/`bean-query` 是外部程序；不导入 Beancount Python 包。

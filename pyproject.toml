@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = []
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.3", "beanquery>=0.2"]
+
 [project.scripts]
 ledger-domain = "ledger_domain.cli:main"
 

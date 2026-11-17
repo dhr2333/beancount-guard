@@ -87,3 +87,40 @@ def insert_month_include(content: str, month: str) -> str:
             insert_at = last_include + 1
     lines.insert(insert_at, f'include "{month}.bean"')
     return document.eol.join(lines) + document.eol
+
+
+APPEND_TARGETS = {
+    "entries": "trans/collect.bean",
+    "reconciliation": "trans/reconciliation.bean",
+}
+
+
+def resolve_append_target(root: str | Path, kind: str) -> dict[str, Any]:
+    """Resolve the fixed append target introduced by ledger-domain-assets.
+
+    Entries go to ``trans/collect.bean``; reconciliation directives go to
+    ``trans/reconciliation.bean``. Both files are part of the include closure
+    and must exist before the first write.
+    """
+    rel_file = APPEND_TARGETS.get(kind)
+    if rel_file is None:
+        fail("invalid_argument", f"unknown append target {kind!r}")
+    path = Path(root) / rel_file
+    if not path.is_file():
+        fail(
+            "ledger_not_initialized",
+            f"the ledger has no {rel_file}; initialize it from ledger-domain-assets before writing",
+            {"file": rel_file},
+        )
+    content = path.read_text(encoding="utf-8")
+    # Keep the historical target shape used by callers. There is no year index
+    # in the fixed-target layout; index_changed is always false.
+    return {
+        "rel_file": rel_file,
+        "file": str(path),
+        "content": content,
+        "index_changed": False,
+        "index_rel": rel_file,
+        "index_file": str(path),
+        "index_content": content,
+    }

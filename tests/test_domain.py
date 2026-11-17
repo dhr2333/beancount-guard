@@ -26,8 +26,12 @@ BEAN_QUERY = os.environ.get("BEAN_QUERY") or (
 
 MAIN = """option "operating_currency" "CNY"
 
-include "account/accounts.bean"
-include "2026/00.bean"
+include "account/assets.bean"
+include "account/liabilities.bean"
+include "account/expenses.bean"
+include "account/income.bean"
+include "account/equity.bean"
+include "trans/main.bean"
 """
 
 ACCOUNTS = """; 账户定义
@@ -52,7 +56,7 @@ ACCOUNTS = """; 账户定义
 2026-02-01 close Assets:Bank:Closed
 """
 
-YEAR_INDEX = 'include "01.bean"\ninclude "11.bean"\n'
+YEAR_INDEX = 'include "collect.bean"\ninclude "reconciliation.bean"\n'
 
 JANUARY = """2026-01-05 * "Cafe" "coffee"
   Expenses:Food    30.00 CNY
@@ -66,12 +70,14 @@ class Fixture:
     def __init__(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="ledger-domain-test-"))
         (self.root / "account").mkdir()
-        (self.root / "2026").mkdir()
+        (self.root / "trans").mkdir()
         (self.root / "main.bean").write_text(MAIN, encoding="utf-8")
-        (self.root / "account/accounts.bean").write_text(ACCOUNTS, encoding="utf-8")
-        (self.root / "2026/00.bean").write_text(YEAR_INDEX, encoding="utf-8")
-        (self.root / "2026/01.bean").write_text(JANUARY, encoding="utf-8")
-        (self.root / "2026/11.bean").write_text("; November\n", encoding="utf-8")
+        (self.root / "account/assets.bean").write_text(ACCOUNTS, encoding="utf-8")
+        for name in ("liabilities", "expenses", "income", "equity"):
+            (self.root / f"account/{name}.bean").write_text("; empty\n", encoding="utf-8")
+        (self.root / "trans/main.bean").write_text(YEAR_INDEX, encoding="utf-8")
+        (self.root / "trans/collect.bean").write_text(JANUARY, encoding="utf-8")
+        (self.root / "trans/reconciliation.bean").write_text("; reconciliation\n", encoding="utf-8")
 
     def domain(self):
         return create_ledger_domain(
@@ -165,7 +171,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(result["reconciliation"]["status"], "scheduled")
         self.assertEqual(result["reconciliation"]["nextDue"], "2026-12-17")
         self.assertEqual(result["reconciliation"]["anchorKind"], "balance")
-        self.assertIn("balance Assets:Bank:Test -30.00 CNY", self.read("2026/11.bean"))
+        self.assertIn("balance Assets:Bank:Test -30.00 CNY", self.read("trans/reconciliation.bean"))
         bootstrap = self.ledger.bootstrap()
         view = next(item for item in bootstrap["accounts"] if item["account"] == "Assets:Bank:Test")
         self.assertEqual(view["status"], "scheduled")
@@ -174,14 +180,14 @@ class DomainTest(unittest.TestCase):
     # --------------------------------------------------------------- write gate
 
     def test_wrong_balance_writes_nothing(self) -> None:
-        before = self.read("2026/11.bean")
+        before = self.read("trans/reconciliation.bean")
         error = self.assert_code(
             "balance_mismatch",
             lambda: self.ledger.submit_balance(account="测试卡", amount="0.00", currency="CNY", date_text=TODAY),
         )
         self.assertEqual(error.details["expected"], "0.00")
         self.assertEqual(error.details["accumulated"], "-30.00")
-        self.assertEqual(self.read("2026/11.bean"), before)
+        self.assertEqual(self.read("trans/reconciliation.bean"), before)
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
     def test_future_and_duplicate_balance(self) -> None:
@@ -196,7 +202,7 @@ class DomainTest(unittest.TestCase):
         )
 
     def test_alias_governance_conflict_clear_and_comment(self) -> None:
-        file = self.fixture.root / "account/accounts.bean"
+        file = self.fixture.root / "account/assets.bean"
         before = file.read_text(encoding="utf-8")
         self.assert_code(
             "alias_conflict",
@@ -226,7 +232,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
     def test_external_metadata_edit_is_observed(self) -> None:
-        file = self.fixture.root / "account/accounts.bean"
+        file = self.fixture.root / "account/assets.bean"
         content = file.read_text(encoding="utf-8")
         file.write_text(
             content.replace(
@@ -265,7 +271,7 @@ class DomainTest(unittest.TestCase):
         approved = self.ledger.approve_draft(draft_id=first["draft"]["id"], actor="test")
         self.assertTrue(approved["committed"])
         self.assertEqual(approved["draft"]["status"], "approved")
-        november = self.read("2026/11.bean")
+        november = self.read("trans/collect.bean")
         self.assertIn('draft_id: "draft-', november)
         self.assertIn("Expenses:Food  38.00 CNY", november)
         self.assertIn("Assets:Bank:Test  -38.00 CNY", november)
@@ -289,7 +295,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(self.ledger.list_drafts(status="pending"), [])
 
     def test_unresolved_and_unbalanced_stay_out(self) -> None:
-        before = self.read("2026/11.bean")
+        before = self.read("trans/collect.bean")
         unresolved = self.ledger.submit_draft(
             {
                 "date": TODAY,
@@ -307,7 +313,7 @@ class DomainTest(unittest.TestCase):
             "unresolved_postings",
             lambda: self.ledger.approve_draft(draft_id=unresolved["draft"]["id"]),
         )
-        self.assertEqual(self.read("2026/11.bean"), before)
+        self.assertEqual(self.read("trans/collect.bean"), before)
 
         unbalanced = self.ledger.submit_draft(
             {
@@ -322,7 +328,7 @@ class DomainTest(unittest.TestCase):
         )
         self.assertFalse(unbalanced["draft"]["approvable"])
         self.assert_code("unbalanced", lambda: self.ledger.approve_draft(draft_id=unbalanced["draft"]["id"]))
-        self.assertEqual(self.read("2026/11.bean"), before)
+        self.assertEqual(self.read("trans/collect.bean"), before)
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
     def test_quick_path(self) -> None:
@@ -340,7 +346,7 @@ class DomainTest(unittest.TestCase):
         approved = self.ledger.approve_draft(draft_id=proposal["draft"]["id"])
         self.assertTrue(approved["committed"])
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
-        self.assertIn("Expenses:Food:Coffee  38.00 CNY", self.read("2026/11.bean"))
+        self.assertIn("Expenses:Food:Coffee  38.00 CNY", self.read("trans/collect.bean"))
 
     # -------------------------------------------------------------------- query
 
@@ -366,7 +372,7 @@ class DomainTest(unittest.TestCase):
             main.read_text(encoding="utf-8") + '\nplugin "beancount.plugins.auto_accounts"\n',
             encoding="utf-8",
         )
-        january = self.fixture.root / "2026/01.bean"
+        january = self.fixture.root / "trans/collect.bean"
         january.write_text(
             january.read_text(encoding="utf-8")
             + '\n2026-01-07 * "Implicit" "auto account"\n  Expenses:Food  5.00 CNY\n  Assets:Bank:Implicit\n',
@@ -378,20 +384,20 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(account["openDate"], "2026-01-07")
         self.assertEqual(ledger.resolve_alias("Assets:Bank:Implicit")["account"], "Assets:Bank:Implicit")
         result = ledger.submit_balance(account="Assets:Bank:Implicit", amount="-5.00", currency="CNY", date_text=TODAY)
-        self.assertEqual(result["file"], "2026/11.bean")
+        self.assertEqual(result["file"], "trans/reconciliation.bean")
         self.assertEqual(ledger.validate(), {"ok": True, "diagnostic": ""})
         self.assert_code(
             "account_not_opened",
             lambda: ledger.set_account_metadata(account="Assets:Bank:Implicit", alias="隐式卡"),
         )
 
-    def test_balance_include_recovery(self) -> None:
-        october = self.fixture.root / "2026/10.bean"
-        october.write_text("; October\n\n2026-10-15 balance Assets:Bank:Test -30.00 CNY\n", encoding="utf-8")
-        result = self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text="2026-10-15")
-        self.assertEqual(result["file"], "2026/10.bean")
-        self.assertEqual(october.read_text(encoding="utf-8").count("balance Assets:Bank:Test"), 1)
-        self.assertIn('include "10.bean"', self.read("2026/00.bean"))
+    def test_existing_balance_is_refused(self) -> None:
+        target = self.fixture.root / "trans/reconciliation.bean"
+        target.write_text("; reconciliation\n\n2026-10-15 balance Assets:Bank:Test -30.00 CNY\n", encoding="utf-8")
+        self.assert_code(
+            "balance_exists",
+            lambda: self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text="2026-10-15"),
+        )
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
     def test_draft_target_file_recovery(self) -> None:
@@ -418,14 +424,69 @@ class DomainTest(unittest.TestCase):
                 ],
             }
         )
-        (self.fixture.root / "2026/12.bean").write_text(f"; December\n\n{block}\n", encoding="utf-8")
+        (self.fixture.root / "trans/collect.bean").write_text(f"; collect\n\n{block}\n", encoding="utf-8")
         approved = self.ledger.approve_draft(draft_id=submitted["draft"]["id"])
         self.assertFalse(approved["committed"])
         self.assertTrue(approved["recovered"])
-        text = self.read("2026/12.bean")
+        text = self.read("trans/collect.bean")
         self.assertEqual(text.count(f'draft_id: "{submitted["draft"]["id"]}"'), 1)
-        self.assertIn('include "12.bean"', self.read("2026/00.bean"))
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_open_account_writes_assets_file(self) -> None:
+        opened = self.ledger.open_account(
+            account="Assets:Bank:Ningbo",
+            currencies=["CNY"],
+            alias="宁波银行",
+            reconcile="monthly",
+        )
+        self.assertEqual(opened["account"], "Assets:Bank:Ningbo")
+        self.assertEqual(opened["alias"], "宁波银行")
+        self.assertEqual(opened["period"], "monthly")
+        text = self.read("account/assets.bean")
+        self.assertIn("open Assets:Bank:Ningbo CNY", text)
+        self.assertIn('alias: "宁波银行"', text)
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+        self.assert_code(
+            "account_exists",
+            lambda: self.ledger.open_account(account="Assets:Bank:Ningbo", currencies=["CNY"]),
+        )
+        self.assert_code(
+            "not_reconcilable",
+            lambda: self.ledger.open_account(account="Expenses:Food:Snack", currencies=["CNY"], reconcile="monthly"),
+        )
+
+    def test_update_draft_persists_fields(self) -> None:
+        submitted = self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "旧商户",
+                "narration": "旧备注",
+                "tags": ["Old"],
+                "postings": [
+                    {"account": "餐饮", "amount": "20.00", "currency": "CNY"},
+                    {"account": "测试卡", "amount": "-20.00", "currency": "CNY"},
+                ],
+            }
+        )
+        draft_id = submitted["draft"]["id"]
+        updated = self.ledger.update_draft(
+            draft_id=draft_id,
+            payload={"payee": "新商户", "narration": "新备注", "tags": ["New"]},
+        )
+        self.assertEqual(updated["draft"]["payee"], "新商户")
+        self.assertEqual(updated["draft"]["narration"], "新备注")
+        self.assertEqual(updated["draft"]["tags"], ["New"])
+        self.assertIn('"payee": "新商户"', self.read(f".ledger/drafts/{draft_id}.json"))
+        approved = self.ledger.approve_draft(draft_id=draft_id)
+        self.assertTrue(approved["committed"])
+        collect = self.read("trans/collect.bean")
+        self.assertIn("新商户", collect)
+        self.assertIn("新备注", collect)
+        self.assert_code(
+            "draft_not_pending",
+            lambda: self.ledger.update_draft(draft_id=draft_id, payload={"payee": "again"}),
+        )
 
     # ------------------------------------------------------------ concurrency / month
 
@@ -443,24 +504,17 @@ class DomainTest(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda fn: fn(), [first, second]))
         self.assertEqual(len(results), 2)
-        november = self.read("2026/11.bean")
-        self.assertIn("balance Assets:Bank:Test -30.00 CNY", november)
-        self.assertIn("balance Assets:Bank:Unmapped 0.00 CNY", november)
+        reconciliation = self.read("trans/reconciliation.bean")
+        self.assertIn("balance Assets:Bank:Test -30.00 CNY", reconciliation)
+        self.assertIn("balance Assets:Bank:Unmapped 0.00 CNY", reconciliation)
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
-    def test_missing_month_file_include_order(self) -> None:
-        (self.fixture.root / "2026/11.bean").unlink()
-        (self.fixture.root / "2026/12.bean").write_text("; December\n", encoding="utf-8")
-        (self.fixture.root / "2026/00.bean").write_text(
-            'include "01.bean"\ninclude "12.bean"\n', encoding="utf-8"
+    def test_missing_reconciliation_target_is_refused(self) -> None:
+        (self.fixture.root / "trans/reconciliation.bean").unlink()
+        self.assert_code(
+            "ledger_not_initialized",
+            lambda: self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text=TODAY),
         )
-        result = self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text=TODAY)
-        self.assertEqual(result["file"], "2026/11.bean")
-        self.assertIn(
-            'include "01.bean"\ninclude "11.bean"\ninclude "12.bean"',
-            self.read("2026/00.bean"),
-        )
-        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from .bean import (
 from .dates import add_days, is_date, iso, today_in_zone
 from .errors import fail
 from .ledger import has_account, resolve_name
-from .target import resolve_monthly_target
+from .target import resolve_append_target
 from .validation import atomic_write, validate_ledger, write_lock
 
 FLAGS = {"*", "!"}
@@ -434,6 +434,42 @@ class DraftStore:
             approvable = not any(issue["code"] in BLOCKING_ISSUES for issue in issues)
             return {"draft": {**document, "approvable": approvable}, "issues": issues, "deduplicated": False}
 
+    def update(self, draft_id: str, payload: object, *, actor: str = "user") -> dict[str, Any]:
+        """Update a pending draft in place and re-run validation."""
+        if not isinstance(payload, dict):
+            fail("invalid_draft", "a draft update must be a JSON object")
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            document = self.get(draft_id)
+            if document["status"] != "pending":
+                fail("draft_not_pending", f"draft {draft_id} is {document['status']}, not pending")
+            merged = {
+                "date": payload.get("date", document["date"]),
+                "flag": payload.get("flag", document["flag"]),
+                "payee": payload.get("payee", document["payee"]),
+                "narration": payload.get("narration", document["narration"]),
+                "tags": payload.get("tags", document["tags"]),
+                "links": payload.get("links", document["links"]),
+                "postings": payload.get("postings", document["postings"]),
+                "source": payload.get("source", document["source"]),
+                "confidence": payload.get("confidence", document.get("confidence")),
+            }
+            draft, issues = normalize_draft_input(
+                merged, state, today=self.today(), max_evidence_bytes=self.max_evidence_bytes
+            )
+            digest = hash_payload(draft)
+            updated = {
+                **document,
+                **draft,
+                "hash": digest,
+                "updatedAt": _now(),
+                "issues": issues,
+            }
+            atomic_write(self.draft_file(draft_id), json.dumps(updated, ensure_ascii=False, indent=2) + "\n")
+            self.audit("draft_updated", {"id": draft_id, "hash": digest, "fields": sorted(payload), "actor": actor})
+            approvable = not any(issue["code"] in BLOCKING_ISSUES for issue in issues)
+            return {"draft": {**updated, "approvable": approvable}, "issues": issues}
+
     def list(self, *, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         state = self.reader.refresh()
         today = self.today()
@@ -524,7 +560,7 @@ class DraftStore:
                     "postings": normalized,
                 }
             )
-            target = resolve_monthly_target(self.root, document["date"])
+            target = resolve_append_target(self.root, "entries")
             if contains_draft_id(target["content"], draft_id):
                 if target["index_changed"]:
                     atomic_write(target["index_file"], target["index_content"])

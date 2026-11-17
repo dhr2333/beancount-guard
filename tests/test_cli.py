@@ -29,17 +29,21 @@ class CliTest(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="ledger-domain-cli-"))
         (self.root / "account").mkdir()
-        (self.root / "2026").mkdir()
+        (self.root / "trans").mkdir()
         (self.root / "main.bean").write_text(
-            'option "operating_currency" "CNY"\n\ninclude "account/accounts.bean"\ninclude "2026/00.bean"\n',
+            'option "operating_currency" "CNY"\n\ninclude "account/assets.bean"\ninclude "account/accounts.bean"\ninclude "account/liabilities.bean"\ninclude "account/expenses.bean"\ninclude "account/income.bean"\ninclude "account/equity.bean"\ninclude "trans/main.bean"\n',
             encoding="utf-8",
         )
         (self.root / "account/accounts.bean").write_text(
             "2026-01-01 open Assets:Bank:Test CNY\n2026-01-01 open Expenses:Food CNY\n",
             encoding="utf-8",
         )
-        (self.root / "2026/00.bean").write_text('include "11.bean"\n', encoding="utf-8")
-        (self.root / "2026/11.bean").write_text("; November\n", encoding="utf-8")
+        (self.root / "account/assets.bean").write_text("; assets\n", encoding="utf-8")
+        for name in ("liabilities", "expenses", "income", "equity"):
+            (self.root / f"account/{name}.bean").write_text("; empty\n", encoding="utf-8")
+        (self.root / "trans/main.bean").write_text('include "collect.bean"\ninclude "reconciliation.bean"\n', encoding="utf-8")
+        (self.root / "trans/collect.bean").write_text("; collect\n", encoding="utf-8")
+        (self.root / "trans/reconciliation.bean").write_text("; reconciliation\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -93,7 +97,32 @@ class CliTest(unittest.TestCase):
         self.assertTrue(balance["ok"])
         self.assertEqual(balance["value"]["result"]["account"], "测试卡")
         self.assertEqual(balance["value"]["result"]["reconciliation"]["nextDue"], "2026-12-17")
-        self.assertIn("balance Assets:Bank:Test 0.00 CNY", (self.root / "2026/11.bean").read_text(encoding="utf-8"))
+        self.assertIn("balance Assets:Bank:Test 0.00 CNY", (self.root / "trans/reconciliation.bean").read_text(encoding="utf-8"))
+
+    def test_update_draft_and_account_open(self) -> None:
+        submitted = self.run_cli(
+            "submit-draft",
+            {
+                "date": "2026-11-17",
+                "payee": "old",
+                "narration": "old",
+                "postings": [
+                    {"account": "Assets:Bank:Test", "amount": "-10.00", "currency": "CNY"},
+                    {"account": "Expenses:Food", "amount": "10.00", "currency": "CNY"},
+                ],
+            },
+        )
+        draft_id = submitted["value"]["draft"]["id"]
+        updated = self.run_cli("update-draft", {"id": draft_id, "payee": "new", "narration": "new"})
+        self.assertTrue(updated["ok"])
+        self.assertEqual(updated["value"]["draft"]["payee"], "new")
+        approved = self.run_cli("approve-draft", {"id": draft_id})
+        self.assertTrue(approved["ok"])
+        self.assertIn("new", (self.root / "trans/collect.bean").read_text(encoding="utf-8"))
+
+        opened = self.run_cli("account-open", {"account": "Assets:Bank:Ningbo", "currency": "CNY", "alias": "宁波银行"})
+        self.assertTrue(opened["ok"])
+        self.assertIn("Assets:Bank:Ningbo", (self.root / "account/assets.bean").read_text(encoding="utf-8"))
 
     def test_future_balance_is_a_business_error(self) -> None:
         result = self.run_cli("balance", {"account": "Assets:Bank:Test", "amount": "0.00", "date": "2099-01-01"})

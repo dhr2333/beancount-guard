@@ -24,9 +24,11 @@ from .amounts import assert_amount, normalize_amount, parse_balance_failure
 from .bean import (
     append_block,
     assert_alias,
+    is_account_name,
     is_currency,
     normalize_alias,
     render_balance,
+    render_open,
     rewrite_open_metadata,
 )
 from .dates import is_date, is_period, iso, today_in_zone
@@ -48,7 +50,7 @@ from .quickpath import build_quick_draft, match_merchants
 from .templates import render_ledger
 from .reconcile import count_reconciliations, reconciliation_of
 from .reconcile import list_reconciliations as list_reminders
-from .target import resolve_monthly_target
+from .target import resolve_append_target
 from .validation import atomic_write, resolve_program, validate_ledger, write_lock
 
 UNSET = object()
@@ -408,6 +410,111 @@ class LedgerDomain:
                 fail("account_not_found", f"{canonical} disappeared during the write")
             return updated
 
+    def open_account(
+        self,
+        *,
+        account: str,
+        date_text: str | None = None,
+        currencies: list[str] | None = None,
+        alias: str | None = None,
+        reconcile: str | None = None,
+        actor: str = "user",
+    ) -> dict[str, Any]:
+        """Append one open directive to account/*.bean."""
+        if not isinstance(account, str) or not is_account_name(account.strip()):
+            fail("invalid_account", f'"{account}" is not a Beancount account')
+        canonical = account.strip()
+        root_name = canonical.split(":", 1)[0]
+        files = {
+            "Assets": "account/assets.bean",
+            "Liabilities": "account/liabilities.bean",
+            "Expenses": "account/expenses.bean",
+            "Income": "account/income.bean",
+            "Equity": "account/equity.bean",
+        }
+        rel_file = files.get(root_name)
+        if rel_file is None:
+            fail("invalid_account", f"{canonical} must start with Assets, Liabilities, Expenses, Income or Equity")
+        open_date = date_text or self.today_text()
+        if not is_date(open_date):
+            fail("invalid_date", "date must be a real YYYY-MM-DD date")
+        if open_date > self.today_text():
+            fail("future_date", "an open directive cannot be dated in the future", {"date": open_date, "today": self.today_text()})
+
+        currency_values = list(currencies) if isinstance(currencies, list) else []
+        cleaned_currencies: list[str] = []
+        for currency in currency_values:
+            if not isinstance(currency, str) or not is_currency(currency.strip()):
+                fail("invalid_currency", f'"{currency}" is not a Beancount currency')
+            if currency.strip() not in cleaned_currencies:
+                cleaned_currencies.append(currency.strip())
+
+        alias_text = assert_alias(alias) if alias is not None else None
+        reconcile_text = reconcile
+        if reconcile_text is not None:
+            if root_name not in {"Assets", "Liabilities"}:
+                fail("not_reconcilable", "only asset and liability accounts can be reconciled", {"account": canonical})
+            if not is_period(reconcile_text):
+                fail("invalid_period", f'"{reconcile_text}" is not a supported reconciliation period', {"supported": ["none", "weekly", "monthly", "quarterly", "yearly"]})
+
+        path = self.root / rel_file
+        if not path.is_file():
+            fail("account_file_missing", f"the ledger has no {rel_file}", {"file": rel_file})
+
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            if canonical in state["opens"] or canonical in state["implicit"]:
+                fail("account_exists", f"{canonical} already exists", {"account": canonical})
+            if alias_text is not None:
+                normalized = normalize_alias(alias_text)
+                conflicts = [entry for entry in state["aliases"].get(normalized, []) if entry["account"] != canonical]
+                if conflicts:
+                    fail(
+                        "alias_conflict",
+                        f'alias "{alias_text}" is already used by '
+                        + ", ".join(project_name(state, entry["account"]) for entry in conflicts),
+                        {"alias": alias_text, "accounts": [entry["account"] for entry in conflicts]},
+                    )
+                collision = next(
+                    (
+                        candidate
+                        for candidate in [*state["opens"], *state["implicit"]]
+                        if normalize_alias(candidate) == normalized
+                    ),
+                    None,
+                )
+                if collision is not None:
+                    fail("alias_conflict", f'alias "{alias_text}" collides with the canonical account {collision}', {"alias": alias_text, "accounts": [collision]})
+
+            content = path.read_text(encoding="utf-8")
+            block = render_open(
+                {
+                    "date": open_date,
+                    "account": canonical,
+                    "currencies": cleaned_currencies,
+                    "alias": alias_text,
+                    "reconcile": reconcile_text,
+                }
+            )
+            next_content = append_block(content, block)
+            validation = validate_ledger(
+                root=self.root,
+                main_file=self.reader.main_file,
+                executable=self.check_program(),
+                overrides={rel_file: next_content},
+                timeout=self.timeout,
+                exclude=self.exclude_entries,
+            )
+            if not validation["ok"]:
+                fail("bean_check_failed", f"the account open was rejected by bean-check: {validation['diagnostic']}", {"diagnostic": validation["diagnostic"]})
+            atomic_write(path, next_content)
+            self.drafts.audit("account_opened", {"account": canonical, "file": rel_file, "alias": alias_text, "reconcile": reconcile_text, "actor": actor})
+            self.reader.invalidate()
+            opened = self.account(canonical)
+            if opened is None:
+                fail("account_not_found", f"{canonical} disappeared during the write")
+            return opened
+
     def submit_balance(
         self,
         *,
@@ -458,7 +565,7 @@ class LedgerDomain:
             if duplicate is not None:
                 fail("balance_exists", f"{canonical} already has a {currency_text} assertion on {assert_date}", {"file": duplicate["rel_file"], "line": duplicate["line"]})
 
-            target = resolve_monthly_target(self.root, assert_date)
+            target = resolve_append_target(self.root, "reconciliation")
             block = render_balance({"date": assert_date, "account": canonical, "amount": amount_text, "currency": currency_text})
             if block in target["content"]:
                 if target["index_changed"]:
@@ -538,6 +645,9 @@ class LedgerDomain:
 
     def submit_draft(self, payload: object) -> dict[str, Any]:
         return self.drafts.submit(payload)
+
+    def update_draft(self, *, draft_id: str, payload: object, actor: str = "user") -> dict[str, Any]:
+        return self.drafts.update(draft_id, payload, actor=actor)
 
     def approve_draft(self, *, draft_id: str, postings: object = None, actor: str = "user") -> dict[str, Any]:
         return self.drafts.approve(draft_id=draft_id, postings=postings, actor=actor)

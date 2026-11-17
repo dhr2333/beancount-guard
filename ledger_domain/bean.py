@@ -309,3 +309,28 @@ def next_line_number(content: str) -> int:
         return 1
     document = split_document(content)
     return len(document.lines) if content.endswith("\n") else len(document.lines) + 1
+
+
+def render_open(account: dict[str, Any]) -> str:
+    """Render one open directive with optional alias/reconcile metadata."""
+    date = account["date"]
+    name = account["account"]
+    if not DATE_TEXT_RE.match(date):
+        fail("invalid_date", "open date must be YYYY-MM-DD")
+    if not is_account_name(name):
+        fail("invalid_account", f'"{name}" is not a Beancount account')
+    currencies = account.get("currencies") or []
+    for currency in currencies:
+        if not is_currency(currency):
+            fail("invalid_currency", f'"{currency}" is not a Beancount currency')
+    line = f"{date} open {name}"
+    if currencies:
+        line += " " + ",".join(currencies)
+    lines = [line]
+    alias = account.get("alias")
+    if alias is not None:
+        lines.append(f"  alias: {quote(alias)}")
+    reconcile = account.get("reconcile")
+    if reconcile is not None:
+        lines.append(f"  reconcile: {quote(reconcile)}")
+    return "\n".join(lines)
