@@ -13,7 +13,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = Path("/home/daihaorui/桌面/GitHub/Assets")
@@ -74,11 +76,14 @@ class CliTest(unittest.TestCase):
     def test_health_and_bootstrap(self) -> None:
         health = self.run_cli("health")
         self.assertTrue(health["ok"])
-        self.assertEqual(health["value"]["today"], "2026-11-17")
+        # 今天必须是真实的上海日期，而不是某个写死的日子（否则隔天就会假红）。
+        expected_today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        self.assertEqual(health["value"]["today"], expected_today)
         bootstrap = self.run_cli("bootstrap")
         self.assertTrue(bootstrap["ok"])
         self.assertEqual(len(bootstrap["value"]["accounts"]), 2)
         self.assertEqual(bootstrap["value"]["pendingDrafts"], [])
+        self.assertEqual(bootstrap["value"]["pendingOperations"], [])
 
     def test_metadata_balance_and_resolve(self) -> None:
         metadata = self.run_cli(
@@ -96,7 +101,7 @@ class CliTest(unittest.TestCase):
         balance = self.run_cli("balance", {"account": "测试卡", "amount": "0.00", "currency": "CNY", "date": "2026-11-17"})
         self.assertTrue(balance["ok"])
         self.assertEqual(balance["value"]["result"]["account"], "测试卡")
-        self.assertEqual(balance["value"]["result"]["reconciliation"]["nextDue"], "2026-12-17")
+        self.assertEqual(balance["value"]["result"]["reconciliation"]["nextDue"], "2026-12-16")
         self.assertIn("balance Assets:Bank:Test 0.00 CNY", (self.root / "trans/reconciliation.bean").read_text(encoding="utf-8"))
 
     def test_update_draft_and_account_open(self) -> None:

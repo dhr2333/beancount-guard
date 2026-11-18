@@ -67,23 +67,29 @@ def _assets(today: str) -> str:
 {today} open Assets:Savings:Cash CNY
   alias: "现金"
 
-{today} open Assets:Savings:Bank:Main CNY
-  alias: "工资卡"
-  reconcile: "monthly"
+{today} open Assets:Savings:Bank:BOC CNY
+  alias: "中国银行"
 
 {today} open Assets:Savings:Web:AliPay CNY
   alias: "支付宝"
 
+{today} open Assets:Savings:Web:AliFund CNY
+  alias: "余额宝"
+  reconcile: "daily"
+
 {today} open Assets:Savings:Web:WechatPay CNY
   alias: "微信"
+
+{today} open Assets:Savings:Web:WechatFund CNY
+  alias: "零钱通"
+  reconcile: "daily"
 """
 
 
 def _liabilities(today: str) -> str:
     return f"""; 负债。
-{today} open Liabilities:CreditCard:Main CNY
-  alias: "信用卡"
-  reconcile: "monthly"
+{today} open Liabilities:CreditCard:Bank:CMB CNY
+  alias: "招商银行"
 """
 
 

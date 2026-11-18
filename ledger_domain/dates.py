@@ -17,7 +17,7 @@ from .errors import fail
 DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 #: Supported reconciliation periods. ``none`` keeps an account out of reminders.
-PERIODS = ("none", "weekly", "monthly", "quarterly", "yearly")
+PERIODS = ("none", "daily", "weekly", "monthly", "quarterly", "yearly")
 
 
 def parse_date(text: object) -> date:
@@ -81,6 +81,8 @@ def add_months(value: date, months: int) -> date:
 
 def add_period(anchor: date, period: str) -> date | None:
     """Add one reconciliation period; ``none`` returns None."""
+    if period == "daily":
+        return add_days(anchor, 1)
     if period == "weekly":
         return add_days(anchor, 7)
     if period == "monthly":

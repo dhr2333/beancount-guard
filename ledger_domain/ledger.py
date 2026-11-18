@@ -165,6 +165,7 @@ class LedgerReader:
                             {
                                 "code": "duplicate_open",
                                 "message": f"{opened['account']} is opened more than once",
+                                "account": opened["account"],
                                 "file": rel_file,
                             }
                         )
@@ -232,6 +233,7 @@ class LedgerReader:
                         "code": "duplicate_alias",
                         "message": f'alias "{entries[0]["alias"]}" is bound to '
                         + ", ".join(entry["account"] for entry in entries),
+                        "alias": entries[0]["alias"],
                     }
                 )
         for account, opened in state["opens"].items():
@@ -241,6 +243,8 @@ class LedgerReader:
                     {
                         "code": "invalid_period",
                         "message": f'{account} has unsupported reconcile period "{period}"',
+                        "account": account,
+                        "period": period,
                         "file": opened["rel_file"],
                     }
                 )
@@ -265,14 +269,14 @@ def _parse_open_metadata(
         raw = parse_quoted_string(alias_entry["raw"])
         if raw is None:
             issues.append(
-                {"code": "invalid_metadata", "message": f"{account} has an alias that is not a quoted string", "file": rel_file}
+                {"code": "invalid_metadata", "message": f"{account} has an alias that is not a quoted string", "account": account, "file": rel_file}
             )
         else:
             try:
                 result["alias"] = assert_alias(raw)
             except Exception as error:
                 issues.append(
-                    {"code": "invalid_metadata", "message": f"{account} has an invalid alias: {error}", "file": rel_file}
+                    {"code": "invalid_metadata", "message": f"{account} has an invalid alias: {error}", "account": account, "file": rel_file}
                 )
     reconcile_entry = next((entry for entry in entries if entry["key"] == "reconcile"), None)
     if reconcile_entry is not None:
@@ -389,17 +393,31 @@ def audit_state(state: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "code": "alias_shadows_account",
                     "message": f'alias "{canonical}" of {account} equals the canonical account {canonical}',
+                    "account": account,
+                    "alias": canonical,
                 }
             )
     for account, opened in state["opens"].items():
         if not is_account_name(account):
-            findings.append({"code": "invalid_account", "message": f"invalid account name {account}", "file": opened["rel_file"]})
+            findings.append({"code": "invalid_account", "message": f"invalid account name {account}", "account": account, "file": opened["rel_file"]})
+        reconcile = (opened.get("metadata") or {}).get("reconcile")
+        if reconcile and account.split(":", 1)[0] not in {"Assets", "Liabilities"}:
+            findings.append(
+                {
+                    "code": "invalid_reconcile_account",
+                    "message": f"{account} is not an asset or liability account but has reconcile metadata",
+                    "account": account,
+                    "file": opened["rel_file"],
+                }
+            )
         for currency in opened["currencies"]:
             if not is_currency(currency):
                 findings.append(
                     {
                         "code": "invalid_currency",
                         "message": f"{account} declares invalid currency {currency}",
+                        "account": account,
+                        "currency": currency,
                         "file": opened["rel_file"],
                     }
                 )

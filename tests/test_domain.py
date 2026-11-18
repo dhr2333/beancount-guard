@@ -54,6 +54,9 @@ ACCOUNTS = """; 账户定义
 
 2026-01-01 open Assets:Bank:Closed CNY
 2026-02-01 close Assets:Bank:Closed
+
+2026-01-01 open Equity:Opening-Balances CNY
+2026-01-01 open Equity:Adjustments CNY
 """
 
 YEAR_INDEX = 'include "collect.bean"\ninclude "reconciliation.bean"\n'
@@ -125,9 +128,10 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(ledger.setup()["title"], "测试账本")
         self.assertEqual(ledger.validate(), {"ok": True, "diagnostic": ""})
         names = [account["name"] for account in ledger.list_accounts()]
-        self.assertIn("工资卡", names)
-        self.assertIn("信用卡", names)
-        self.assertEqual(ledger.resolve_alias("工资卡")["account"], "Assets:Savings:Bank:Main")
+        self.assertIn("中国银行", names)
+        self.assertIn("招商银行", names)
+        self.assertEqual(ledger.resolve_alias("中国银行")["account"], "Assets:Savings:Bank:BOC")
+        self.assertEqual(ledger.resolve_alias("招商银行")["account"], "Liabilities:CreditCard:Bank:CMB")
         self.assert_code("ledger_exists", lambda: ledger.init_ledger(title="再一次"))
 
     def test_init_refuses_a_non_empty_directory(self) -> None:
@@ -161,21 +165,22 @@ class DomainTest(unittest.TestCase):
         before = self.ledger.get_due_reconciliations()
         self.assertEqual(before["today"], TODAY)
         reminder = next(item for item in before["reminders"] if item["account"] == "Assets:Bank:Test")
-        self.assertEqual(reminder["status"], "overdue")
+        self.assertEqual(reminder["status"], "due")
+        self.assertEqual(reminder["unreconciled"], True)
         self.assertEqual(reminder["anchorKind"], "open")
-        self.assertEqual(reminder["nextDue"], "2026-02-01")
+        self.assertEqual(reminder["nextDue"], TODAY)
         self.assertFalse(any(item["account"] == "Expenses:Food:Coffee" for item in before["reminders"]))
 
         result = self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text=TODAY)
         self.assertEqual(result["name"], "测试卡")
         self.assertEqual(result["reconciliation"]["status"], "scheduled")
-        self.assertEqual(result["reconciliation"]["nextDue"], "2026-12-17")
+        self.assertEqual(result["reconciliation"]["nextDue"], "2026-12-16")
         self.assertEqual(result["reconciliation"]["anchorKind"], "balance")
         self.assertIn("balance Assets:Bank:Test -30.00 CNY", self.read("trans/reconciliation.bean"))
         bootstrap = self.ledger.bootstrap()
         view = next(item for item in bootstrap["accounts"] if item["account"] == "Assets:Bank:Test")
         self.assertEqual(view["status"], "scheduled")
-        self.assertEqual(view["nextDue"], "2026-12-17")
+        self.assertEqual(view["nextDue"], "2026-12-16")
 
     # --------------------------------------------------------------- write gate
 
@@ -211,7 +216,7 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(file.read_text(encoding="utf-8"), before)
         self.assert_code(
             "invalid_period",
-            lambda: self.ledger.set_account_metadata(account="Assets:Bank:Unmapped", reconcile="daily"),
+            lambda: self.ledger.set_account_metadata(account="Assets:Bank:Unmapped", reconcile="hourly"),
         )
         self.assertEqual(file.read_text(encoding="utf-8"), before)
 
@@ -456,6 +461,162 @@ class DomainTest(unittest.TestCase):
             lambda: self.ledger.open_account(account="Expenses:Food:Snack", currencies=["CNY"], reconcile="monthly"),
         )
 
+    def test_redate_moves_open_dates_earlier_only(self) -> None:
+        result = self.ledger.redate_accounts(date_text="2025-12-01", all_accounts=True)
+        changed = {item["account"]: item for item in result["changed"]}
+        self.assertEqual(changed["Assets:Bank:Test"]["from"], "2026-01-01")
+        self.assertEqual(changed["Assets:Bank:Test"]["to"], "2025-12-01")
+        text = self.read("account/assets.bean")
+        self.assertIn("2025-12-01 open Assets:Bank:Test CNY", text)
+        self.assertNotIn("2026-01-01 open Assets:Bank:Test CNY", text)
+        # 注释与 metadata 原样保留
+        self.assertIn('alias: "测试卡"', text)
+        self.assertIn('reconcile: "monthly"', text)
+        self.assertIn("; 测试卡", text)
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+        # 已早于目标日的账户不动
+        again = self.ledger.redate_accounts(date_text="2025-12-01", all_accounts=True)
+        self.assertEqual(again["changed"], [])
+
+        # 只能前移：显式改晚会被拒绝
+        self.assert_code(
+            "date_not_earlier",
+            lambda: self.ledger.redate_accounts(date_text="2026-06-01", accounts=["Assets:Bank:Test"]),
+        )
+        self.assert_code(
+            "future_date",
+            lambda: self.ledger.redate_accounts(date_text="2099-01-01", accounts=["Assets:Bank:Test"]),
+        )
+        self.assert_code("account_not_found", lambda: self.ledger.redate_accounts(date_text="2025-12-01", accounts=["不存在"]))
+
+    def test_redate_resolves_alias(self) -> None:
+        self.ledger.redate_accounts(date_text="2025-12-01", accounts=["测试卡"])
+        self.assertIn("2025-12-01 open Assets:Bank:Test CNY", self.read("account/assets.bean"))
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_operation_waits_for_approval(self) -> None:
+        before = self.read("account/assets.bean")
+        submitted = self.ledger.submit_operation(
+            {
+                "kind": "account-redate",
+                "payload": {"date": "2025-12-01", "all": True},
+                "reason": "导入历史账单",
+                "proposedBy": "agent",
+            }
+        )
+        operation = submitted["operation"]
+        self.assertEqual(operation["status"], "pending")
+        self.assertTrue(operation["approvable"])
+        # 入队不等于落盘
+        self.assertEqual(self.read("account/assets.bean"), before)
+        self.assertEqual(self.ledger.account("Assets:Bank:Test")["openDate"], "2026-01-01")
+
+        approved = self.ledger.approve_operation(operation_id=operation["id"])
+        self.assertEqual(approved["status"], "approved")
+        self.assertIn("2025-12-01 open Assets:Bank:Test CNY", self.read("account/assets.bean"))
+        self.assertEqual(self.ledger.operations.summary(), {"pending": 0, "approved": 1, "rejected": 0})
+        # 重复提交同内容应去重
+        again = self.ledger.submit_operation(
+            {"kind": "account-redate", "payload": {"date": "2025-12-01", "all": True}}
+        )
+        self.assertFalse(again["deduplicated"])
+
+    def test_operation_reject_leaves_ledger_untouched(self) -> None:
+        before = self.read("account/assets.bean")
+        submitted = self.ledger.submit_operation(
+            {"kind": "account-open", "payload": {"account": "Assets:Bank:New", "currencies": ["CNY"]}}
+        )
+        rejected = self.ledger.reject_operation(operation_id=submitted["operation"]["id"], reason="不需要")
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertIsNone(self.ledger.account("Assets:Bank:New"))
+        self.assertEqual(self.read("account/assets.bean"), before)
+        self.assert_code("operation_not_pending", lambda: self.ledger.approve_operation(operation_id=submitted["operation"]["id"]))
+
+    def test_operation_rejects_bad_shape(self) -> None:
+        self.assert_code(
+            "invalid_operation",
+            lambda: self.ledger.submit_operation({"kind": "delete-ledger", "payload": {}}),
+        )
+        duplicate = self.ledger.submit_operation(
+            {"kind": "account-open", "payload": {"account": "Assets:Bank:Test", "currencies": ["CNY"]}}
+        )
+        self.assertEqual([issue["code"] for issue in duplicate["operation"]["issues"]], ["account_exists"])
+
+    def test_approving_structure_resolves_waiting_drafts(self) -> None:
+        draft = self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "新卡消费",
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "12.00", "currency": "CNY"},
+                    {"account": "Assets:Bank:Later", "amount": "-12.00", "currency": "CNY"},
+                ],
+            }
+        )["draft"]
+        self.assertFalse(draft["approvable"])
+        self.assertEqual([i["code"] for i in draft["issues"]], ["unresolved_account"])
+
+        operation = self.ledger.submit_operation(
+            {
+                "kind": "account-open",
+                "payload": {"account": "Assets:Bank:Later", "date": "2026-01-01", "currencies": ["CNY"]},
+            }
+        )["operation"]
+        approved = self.ledger.approve_operation(operation_id=operation["id"])
+        self.assertEqual(approved.get("refreshedDrafts", {}).get("drafts"), 1)
+
+        refreshed = self.ledger.get_draft(draft["id"])
+        self.assertTrue(refreshed["approvable"])
+        self.assertEqual(refreshed["issues"], [])
+        self.ledger.approve_draft(draft_id=draft["id"])
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_approve_all_drafts_skips_blocked(self) -> None:
+        for index in range(3):
+            self.ledger.submit_draft(
+                {
+                    "date": TODAY,
+                    "payee": f"批量{index}",
+                    "postings": [
+                        {"account": "Expenses:Food", "amount": "1.00", "currency": "CNY"},
+                        {"account": "Assets:Bank:Test", "amount": "-1.00", "currency": "CNY"},
+                    ],
+                }
+            )
+        # 一张卡不存在的草稿，应当被跳过而不是报错中断
+        self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "卡住的一笔",
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "2.00", "currency": "CNY"},
+                    {"account": "Assets:Bank:Missing", "amount": "-2.00", "currency": "CNY"},
+                ],
+            }
+        )
+        result = self.ledger.approve_all_drafts()
+        self.assertEqual(result["approved"], 3)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(self.ledger.drafts.summary(), {"pending": 1, "approved": 3, "rejected": 0})
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_approve_all_operations_continues_past_failure(self) -> None:
+        self.ledger.submit_operation(
+            {"kind": "account-open", "payload": {"account": "Assets:Bank:Batch", "currencies": ["CNY"]}}
+        )
+        # 余额与账本不符，批准时应失败并留在待办
+        self.ledger.submit_operation(
+            {"kind": "balance", "payload": {"account": "Assets:Bank:Batch", "amount": "999.00", "currency": "CNY"}}
+        )
+        result = self.ledger.approve_all_operations()
+        self.assertEqual(result["approved"], 1)
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["code"], "balance_mismatch")
+        self.assertEqual(self.ledger.operations.summary(), {"pending": 1, "approved": 1, "rejected": 0})
+        self.assertIsNotNone(self.ledger.account("Assets:Bank:Batch"))
+
     def test_update_draft_persists_fields(self) -> None:
         submitted = self.ledger.submit_draft(
             {
@@ -515,6 +676,264 @@ class DomainTest(unittest.TestCase):
             "ledger_not_initialized",
             lambda: self.ledger.submit_balance(account="测试卡", amount="-30.00", currency="CNY", date_text=TODAY),
         )
+
+
+class ReconciliationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.ledger = self.fixture.domain()
+
+    def tearDown(self) -> None:
+        self.fixture.dispose()
+
+    def preview_commit(self, **overrides):
+        payload = {
+            "account": "测试卡",
+            "asOf": TODAY,
+            "actual": "-30.00",
+            "allocations": [],
+            "padAccount": None,
+        }
+        payload.update(overrides)
+        preview = self.ledger.preview_reconciliation(payload)
+        request = {
+            **payload,
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        return preview, self.ledger.commit_reconciliation(request)
+
+    def test_first_due_is_unreconciled_and_balance_anchor(self) -> None:
+        reminder = next(
+            item for item in self.ledger.get_due_reconciliations()["reminders"] if item["account"] == "Assets:Bank:Test"
+        )
+        self.assertEqual(reminder["status"], "due")
+        self.assertTrue(reminder["unreconciled"])
+        self.assertEqual(reminder["nextDue"], TODAY)
+        self.assertIsNone(reminder["coveredThrough"])
+
+        preview, result = self.preview_commit()
+        self.assertEqual(preview["expected"], "-30.00")
+        self.assertEqual(preview["balanceDate"], "2026-11-18")
+        self.assertIn("2026-11-18 balance Assets:Bank:Test -30.00 CNY", self.fixture.root.joinpath("trans/reconciliation.bean").read_text())
+        self.assertTrue(result["committed"])
+
+        account = self.ledger.account("测试卡")
+        self.assertEqual(account["status"], "scheduled")
+        self.assertEqual(account["nextDue"], "2026-12-17")
+        self.assertEqual(account["coveredThrough"], TODAY)
+        self.assertFalse(account["unreconciled"])
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_preview_commit_with_allocation_and_pad(self) -> None:
+        preview = self.ledger.preview_reconciliation(
+            {
+                "account": "测试卡",
+                "asOf": TODAY,
+                "actual": "-40.00",
+                "allocations": [
+                    {"account": "Expenses:Food", "amount": "20.00", "date": "2026-11-10", "note": "补记", "tags": ["Discretionary"]},
+                    {"account": "Equity:Adjustments", "mode": "remainder"},
+                ],
+            }
+        )
+        self.assertEqual(preview["expected"], "-30.00")
+        self.assertEqual(preview["difference"], "-10.00")
+        self.assertEqual(preview["remaining"], "10.00")
+        self.assertIn("pad Assets:Bank:Test Equity:Adjustments", preview["directives"])
+        self.assertIn("2026-11-18 balance Assets:Bank:Test -40.00 CNY", preview["directives"])
+        request = {
+            "account": "测试卡",
+            "asOf": TODAY,
+            "actual": "-40.00",
+            "allocations": [
+                {"account": "Expenses:Food", "amount": "20.00", "date": "2026-11-10", "note": "补记", "tags": ["Discretionary"]},
+                {"account": "Equity:Adjustments", "mode": "remainder"},
+            ],
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        result = self.ledger.commit_reconciliation(request)
+        self.assertTrue(result["committed"])
+        history = self.ledger.reconcile_history(account="测试卡")["records"]
+        self.assertEqual(history[0]["status"], "active")
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_update_same_asof_replaces_block(self) -> None:
+        self.preview_commit()
+        preview, result = self.preview_commit(actual="-50.00")
+        self.assertEqual(preview["mode"], "update")
+        self.assertEqual(preview["expected"], "-30.00")
+        self.assertTrue(result["committed"])
+        content = self.fixture.root.joinpath("trans/reconciliation.bean").read_text()
+        self.assertEqual(content.count("2026-11-18 balance Assets:Bank:Test"), 1)
+        self.assertIn("2026-11-18 balance Assets:Bank:Test -50.00 CNY", content)
+        history = self.ledger.reconcile_history(account="测试卡")["records"]
+        active = [item for item in history if item["status"] == "active"]
+        self.assertEqual(len(active), 1)
+        self.assertTrue(any(item["status"] == "superseded" for item in history))
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_late_draft_auto_pads_without_a_pad(self) -> None:
+        self.preview_commit()
+        draft = self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "晚餐",
+                "narration": "补记",
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "20.00", "currency": "CNY"},
+                    {"account": "Assets:Bank:Test", "amount": "-20.00", "currency": "CNY"},
+                ],
+                "source": {"kind": "manual"},
+            }
+        )
+        approved = self.ledger.approve_draft(draft_id=draft["draft"]["id"])
+        self.assertTrue(approved["committed"])
+        self.assertIsNotNone(approved.get("autoPad"))
+        content = self.fixture.root.joinpath("trans/reconciliation.bean").read_text()
+        self.assertIn("pad Assets:Bank:Test Equity:Opening-Balances", content)
+        self.assertIn("2026-11-18 balance Assets:Bank:Test -30.00 CNY", content)
+        history = self.ledger.reconcile_history(account="测试卡")["records"]
+        self.assertTrue(any(item.get("autoPad") for item in history))
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_expense_cannot_get_a_reconcile_period(self) -> None:
+        from ledger_domain import LedgerError
+
+        with self.assertRaises(LedgerError) as caught:
+            self.ledger.set_account_metadata(account="Expenses:Food", reconcile="monthly")
+        self.assertEqual(caught.exception.code, "not_reconcilable")
+
+    def test_stale_preview_is_refused(self) -> None:
+        preview = self.ledger.preview_reconciliation({"account": "Assets:Bank:Test", "asOf": TODAY, "actual": "-30.00"})
+        self.ledger.set_account_metadata(account="测试卡", alias="测试卡2")
+        request = {
+            "account": "Assets:Bank:Test",
+            "asOf": TODAY,
+            "actual": "-30.00",
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        with self.assertRaises(LedgerError) as caught:
+            self.ledger.commit_reconciliation(request)
+        self.assertEqual(caught.exception.code, "stale_preview")
+        self.assertNotIn("balance Assets:Bank:Test", self.fixture.root.joinpath("trans/reconciliation.bean").read_text())
+
+    def test_pending_draft_blocks_commit(self) -> None:
+        preview = self.ledger.preview_reconciliation({"account": "测试卡", "asOf": TODAY, "actual": "-30.00"})
+        self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "晚餐",
+                "narration": "补记",
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "20.00", "currency": "CNY"},
+                    {"account": "Assets:Bank:Test", "amount": "-20.00", "currency": "CNY"},
+                ],
+                "source": {"kind": "manual"},
+            }
+        )
+        request = {
+            "account": "测试卡",
+            "asOf": TODAY,
+            "actual": "-30.00",
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        with self.assertRaises(LedgerError) as caught:
+            self.ledger.commit_reconciliation(request)
+        self.assertEqual(caught.exception.code, "pending_drafts")
+
+    def test_unallocated_difference_is_refused(self) -> None:
+        with self.assertRaises(LedgerError) as caught:
+            self.ledger.preview_reconciliation(
+                {
+                    "account": "测试卡",
+                    "asOf": TODAY,
+                    "actual": "-40.00",
+                    "allocations": [{"account": "Expenses:Food", "amount": "5.00", "date": "2026-11-10"}],
+                }
+            )
+        self.assertEqual(caught.exception.code, "unallocated_difference")
+
+    def test_zero_first_reconciliation_ignores_empty_remainder(self) -> None:
+        preview = self.ledger.preview_reconciliation(
+            {
+                "account": "Assets:Bank:Unmapped",
+                "asOf": TODAY,
+                "actual": "0.00",
+                "allocations": [{"account": "Equity:Opening-Balances", "mode": "remainder"}],
+            }
+        )
+        self.assertEqual(preview["difference"], "0.00")
+        self.assertEqual(preview["allocations"], [])
+        self.assertIsNone(preview["pad"])
+        self.assertIn("balance Assets:Bank:Unmapped 0.00 CNY", preview["directives"])
+        request = {
+            "account": "Assets:Bank:Unmapped",
+            "asOf": TODAY,
+            "actual": "0.00",
+            "allocations": [{"account": "Equity:Opening-Balances", "mode": "remainder"}],
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        result = self.ledger.commit_reconciliation(request)
+        self.assertTrue(result["committed"])
+        content = self.fixture.root.joinpath("trans/reconciliation.bean").read_text()
+        self.assertIn("balance Assets:Bank:Unmapped 0.00 CNY", content)
+        self.assertNotIn("pad Assets:Bank:Unmapped", content)
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_daily_period_is_supported_and_due_immediately(self) -> None:
+        updated = self.ledger.set_account_metadata(account="Assets:Bank:Unmapped", reconcile="daily")
+        self.assertEqual(updated["period"], "daily")
+        reminder = next(
+            item for item in self.ledger.get_due_reconciliations()["reminders"] if item["account"] == "Assets:Bank:Unmapped"
+        )
+        self.assertEqual(reminder["status"], "due")
+        self.assertTrue(reminder["unreconciled"])
+        self.assertEqual(reminder["nextDue"], TODAY)
+
+        preview = self.ledger.preview_reconciliation({"account": "Assets:Bank:Unmapped", "asOf": TODAY, "actual": "0.00"})
+        request = {
+            "account": "Assets:Bank:Unmapped",
+            "asOf": TODAY,
+            "actual": "0.00",
+            "mode": preview["mode"],
+            "previewId": preview["previewId"],
+            "ledgerRevision": preview["ledgerRevision"],
+            "inputsHash": preview["inputsHash"],
+            "directivesHash": preview["directivesHash"],
+            "replaces": preview.get("replaces"),
+        }
+        result = self.ledger.commit_reconciliation(request)
+        self.assertTrue(result["committed"])
+        account = self.ledger.account("Assets:Bank:Unmapped")
+        self.assertEqual(account["status"], "scheduled")
+        self.assertEqual(account["nextDue"], "2026-11-18")
+        self.assertEqual(account["coveredThrough"], TODAY)
+        self.assertTrue(self.ledger.validate()["ok"])
 
 
 if __name__ == "__main__":

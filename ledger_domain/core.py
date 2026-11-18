@@ -29,10 +29,12 @@ from .bean import (
     normalize_alias,
     render_balance,
     render_open,
+    rewrite_open_date,
     rewrite_open_metadata,
 )
 from .dates import is_date, is_period, iso, today_in_zone
-from .drafts import DraftStore
+from .drafts import DraftStore, assess_draft
+from .operations import OperationStore
 from .errors import LedgerError, fail
 from .ledger import (
     LedgerReader,
@@ -47,6 +49,7 @@ from .ledger import (
 from .query import query_balances as query_balances_impl
 from .query import query_transactions as query_transactions_impl
 from .quickpath import build_quick_draft, match_merchants
+from .reconciliation import Reconciler
 from .templates import render_ledger
 from .reconcile import count_reconciliations, reconciliation_of
 from .reconcile import list_reconciliations as list_reminders
@@ -104,6 +107,16 @@ class LedgerDomain:
             timeout=self.timeout,
             exclude_entries=self.exclude_entries,
         )
+        self.operations = OperationStore(
+            root=self.root,
+            reader=self.reader,
+            state_dir=state_dir,
+            time_zone=time_zone,
+            now=self.now,
+        )
+        self.reconciler = Reconciler(self)
+        self.drafts.approval_hook = self.reconciler.auto_pad_for_draft
+        self.drafts.approval_finalize = self.reconciler.finalize_auto_pad
         self._programs: dict[str, str] = {}
 
     def today(self) -> date:
@@ -280,6 +293,8 @@ class LedgerDomain:
             "due": reminder,
             "status": reminder["status"] if reminder is not None else None,
             "nextDue": reminder["nextDue"] if reminder is not None else None,
+            "coveredThrough": reminder.get("coveredThrough") if reminder is not None else None,
+            "unreconciled": reminder.get("unreconciled") if reminder is not None else False,
         }
 
     def get_due_reconciliations(self, *, include_scheduled: bool = True) -> dict[str, Any]:
@@ -317,6 +332,7 @@ class LedgerDomain:
             "due": due,
             "counts": count_reconciliations(reminders),
             "drafts": self.drafts.summary(),
+            "operations": self.operations.summary(),
             "issues": audit_state(state),
         }
 
@@ -341,7 +357,7 @@ class LedgerDomain:
         if reconcile is not UNSET:
             values["reconcile"] = reconcile  # type: ignore[assignment]
             if reconcile is not None and not is_period(reconcile):
-                fail("invalid_period", f'"{reconcile}" is not a supported reconciliation period', {"supported": ["none", "weekly", "monthly", "quarterly", "yearly"]})
+                fail("invalid_period", f'"{reconcile}" is not a supported reconciliation period', {"supported": ["none", "daily", "weekly", "monthly", "quarterly", "yearly"]})
         if not values:
             fail("invalid_argument", "set alias and/or reconcile")
 
@@ -357,6 +373,13 @@ class LedgerDomain:
                     "account_not_opened",
                     f"{canonical} exists only through transactions or balances; add an open directive to govern its metadata",
                     {"account": canonical, "implicit": True},
+                )
+
+            if "reconcile" in values and canonical.split(":", 1)[0] not in {"Assets", "Liabilities"}:
+                fail(
+                    "not_reconcilable",
+                    "only asset and liability accounts can be reconciled",
+                    {"account": canonical},
                 )
 
             if values.get("alias") is not None:
@@ -455,7 +478,7 @@ class LedgerDomain:
             if root_name not in {"Assets", "Liabilities"}:
                 fail("not_reconcilable", "only asset and liability accounts can be reconciled", {"account": canonical})
             if not is_period(reconcile_text):
-                fail("invalid_period", f'"{reconcile_text}" is not a supported reconciliation period', {"supported": ["none", "weekly", "monthly", "quarterly", "yearly"]})
+                fail("invalid_period", f'"{reconcile_text}" is not a supported reconciliation period', {"supported": ["none", "daily", "weekly", "monthly", "quarterly", "yearly"]})
 
         path = self.root / rel_file
         if not path.is_file():
@@ -514,6 +537,97 @@ class LedgerDomain:
             if opened is None:
                 fail("account_not_found", f"{canonical} disappeared during the write")
             return opened
+
+    def redate_accounts(
+        self,
+        *,
+        date_text: str,
+        accounts: list[str] | None = None,
+        all_accounts: bool = False,
+    ) -> dict[str, Any]:
+        """Move existing ``open`` directives earlier, e.g. to backfill an import.
+
+        Only moving a date *earlier* is allowed: a later date could orphan
+        transactions that are already recorded against the account, and
+        ``bean-check`` does not detect that. Multiple files are validated in one
+        shadow-tree pass and only then replaced one by one.
+        """
+        if not is_date(date_text):
+            fail("invalid_date", "date must be a real YYYY-MM-DD date")
+        if date_text > self.today_text():
+            fail("future_date", "an open directive cannot be dated in the future", {"date": date_text, "today": self.today_text()})
+        requested = [item.strip() for item in (accounts or []) if isinstance(item, str) and item.strip()]
+        if not all_accounts and not requested:
+            fail("invalid_argument", "pass accounts or all: true")
+
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            if all_accounts:
+                targets = sorted(state["opens"])
+            else:
+                targets = []
+                for name in requested:
+                    resolution = resolve_name(state, name)
+                    if resolution is None:
+                        fail("account_not_found", f'"{name}" is not a known account or alias')
+                    canonical = resolution["account"]
+                    if canonical not in state["opens"]:
+                        fail(
+                            "account_not_opened",
+                            f"{canonical} exists only through transactions or balances; there is no open directive to redate",
+                            {"account": canonical, "implicit": True},
+                        )
+                    if canonical not in targets:
+                        targets.append(canonical)
+
+            rewrites: dict[str, str] = {}
+            changed: list[dict[str, Any]] = []
+            unchanged: list[str] = []
+            for canonical in targets:
+                opened = state["opens"][canonical]
+                current = opened["date"]
+                if current <= date_text:
+                    if not all_accounts and current < date_text:
+                        fail(
+                            "date_not_earlier",
+                            f"{canonical} is already open on {current}; redate only moves an open date earlier",
+                            {"account": canonical, "current": current, "requested": date_text},
+                        )
+                    unchanged.append(canonical)
+                    continue
+                rel_file = opened["rel_file"]
+                current_content = rewrites.get(rel_file)
+                if current_content is None:
+                    current_content = Path(opened["file"]).read_text(encoding="utf-8")
+                rewritten, _ = rewrite_open_date(current_content, canonical, date_text)
+                rewrites[rel_file] = rewritten
+                changed.append({"account": canonical, "from": current, "to": date_text, "file": rel_file})
+
+            if not changed:
+                return {"date": date_text, "changed": [], "unchanged": unchanged}
+
+            validation = validate_ledger(
+                root=self.root,
+                main_file=self.reader.main_file,
+                executable=self.check_program(),
+                overrides=rewrites,
+                timeout=self.timeout,
+                exclude=self.exclude_entries,
+            )
+            if not validation["ok"]:
+                fail(
+                    "bean_check_failed",
+                    f"the redate was rejected by bean-check: {validation['diagnostic']}",
+                    {"diagnostic": validation["diagnostic"]},
+                )
+            for rel_file, content in rewrites.items():
+                atomic_write(self.root / rel_file, content)
+            self.drafts.audit(
+                "accounts_redated",
+                {"date": date_text, "accounts": [item["account"] for item in changed]},
+            )
+            self.reader.invalidate()
+            return {"date": date_text, "changed": changed, "unchanged": unchanged}
 
     def submit_balance(
         self,
@@ -635,6 +749,17 @@ class LedgerDomain:
             "accountView": updated,
         }
 
+    # --------------------------------------------------------------- reconcile
+
+    def preview_reconciliation(self, payload: object) -> dict[str, Any]:
+        return self.reconciler.preview(payload)
+
+    def commit_reconciliation(self, payload: object) -> dict[str, Any]:
+        return self.reconciler.commit(payload)
+
+    def reconcile_history(self, *, account: str | None = None, limit: int = 50) -> dict[str, Any]:
+        return self.reconciler.history(account=account, limit=limit)
+
     # ------------------------------------------------------------------- drafts
 
     def list_drafts(self, *, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
@@ -646,6 +771,10 @@ class LedgerDomain:
     def submit_draft(self, payload: object) -> dict[str, Any]:
         return self.drafts.submit(payload)
 
+    def refresh_drafts(self) -> dict[str, Any]:
+        """Re-resolve pending drafts after the account set changed (queue only)."""
+        return self.drafts.refresh_resolutions()
+
     def update_draft(self, *, draft_id: str, payload: object, actor: str = "user") -> dict[str, Any]:
         return self.drafts.update(draft_id, payload, actor=actor)
 
@@ -654,6 +783,115 @@ class LedgerDomain:
 
     def reject_draft(self, *, draft_id: str, reason: str = "", actor: str = "user") -> dict[str, Any]:
         return self.drafts.reject(draft_id=draft_id, reason=reason, actor=actor)
+
+    # ------------------------------------------------------------ operation queue
+
+    def _project_operation(self, document: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **document,
+            "approvable": document.get("status") == "pending" and not document.get("issues"),
+        }
+
+    def list_operations(self, *, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+        return [self._project_operation(item) for item in self.operations.list(status=status, limit=limit)]
+
+    def get_operation(self, operation_id: str) -> dict[str, Any]:
+        return self._project_operation(self.operations.get(operation_id))
+
+    def submit_operation(self, payload: object) -> dict[str, Any]:
+        stored = self.operations.submit(payload)
+        return {"operation": self._project_operation(stored["operation"]), "deduplicated": stored["deduplicated"]}
+
+    def approve_operation(self, *, operation_id: str, actor: str = "user") -> dict[str, Any]:
+        """Execute a queued structure write through the normal, validated methods."""
+        document = self.operations.get(operation_id)
+        if document.get("status") != "pending":
+            fail("operation_not_pending", f"operation {operation_id} is {document.get('status')}, not pending")
+        kind = document["kind"]
+        payload = document["payload"]
+        if kind == "account-open":
+            result: dict[str, Any] = self.open_account(
+                account=payload["account"],
+                date_text=payload["date"],
+                currencies=payload["currencies"],
+                alias=payload.get("alias"),
+                reconcile=payload.get("reconcile"),
+                actor=actor,
+            )
+        elif kind == "account-redate":
+            result = self.redate_accounts(
+                date_text=payload["date"],
+                accounts=payload.get("accounts") or [],
+                all_accounts=payload.get("all") is True,
+            )
+        elif kind == "account-metadata":
+            kwargs: dict[str, Any] = {"account": payload["account"]}
+            if "alias" in payload:
+                kwargs["alias"] = payload["alias"]
+            if "reconcile" in payload:
+                kwargs["reconcile"] = payload["reconcile"]
+            result = self.set_account_metadata(**kwargs)
+        elif kind == "balance":
+            result = self.submit_balance(
+                account=payload["account"],
+                amount=payload["amount"],
+                currency=payload.get("currency"),
+                date_text=payload.get("date"),
+                note=payload.get("note") or None,
+            )
+        else:  # pragma: no cover - guarded by normalize_operation
+            fail("invalid_operation", f"unknown operation kind {kind}")
+        marked = self.operations.mark(
+            operation_id, "approved", actor=actor, detail={"summary": document.get("summary", "")}
+        )
+        # 结构落盘后立刻让原本卡住的草稿重新解析，否则批准完开户还要人工逐笔重填。
+        if kind in {"account-open", "account-redate"}:
+            refreshed = self.drafts.refresh_resolutions()
+            if refreshed["drafts"]:
+                marked = {**marked, "refreshedDrafts": refreshed}
+        return marked
+
+    def approve_all_operations(self, *, actor: str = "user") -> dict[str, Any]:
+        """Approve every pending operation, oldest first, one block per click."""
+        pending = sorted(
+            (item for item in self.operations.list(status="pending")),
+            key=lambda item: item.get("createdAt", ""),
+        )
+        done: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for document in pending:
+            try:
+                approved = self.approve_operation(operation_id=document["id"], actor=actor)
+                done.append({"id": document["id"], "summary": document.get("summary", ""), "operation": approved})
+            except LedgerError as error:
+                failed.append({"id": document["id"], "summary": document.get("summary", ""), "code": error.code, "message": error.message})
+        return {"approved": len(done), "failed": failed, "results": done}
+
+    def reject_operation(self, *, operation_id: str, reason: str = "", actor: str = "user") -> dict[str, Any]:
+        return self.operations.mark(operation_id, "rejected", actor=actor, detail={"reason": reason})
+
+    def approve_all_drafts(self, *, actor: str = "user") -> dict[str, Any]:
+        """Approve every approvable pending draft, by date, in one pass."""
+        self.drafts.refresh_resolutions()
+        pending = [self.project_draft(item) for item in self.drafts.list(status="pending", limit=self.drafts.max_drafts)]
+        ordered = sorted(pending, key=lambda item: (item.get("date", ""), item.get("createdAt", "")))
+        done: list[str] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for draft in ordered:
+            if not draft.get("approvable"):
+                skipped.append({
+                    "id": draft["id"],
+                    "payee": draft.get("payee") or draft.get("narration"),
+                    "issues": sorted({issue.get("code", "") for issue in draft.get("issues", [])}),
+                })
+                continue
+            try:
+                self.approve_draft(draft_id=draft["id"], actor=actor)
+                done.append(draft["id"])
+            except LedgerError as error:
+                failed.append({"id": draft["id"], "code": error.code, "message": error.message})
+        return {"approved": len(done), "skipped": skipped, "failed": failed}
 
     # ------------------------------------------------------------------ proposal
 
@@ -748,6 +986,12 @@ class LedgerDomain:
 
     def project_draft(self, document: dict[str, Any]) -> dict[str, Any]:
         state = self.reader.refresh()
+        # 待审草稿的 issues 按当前账本重算：结构变更（开户/改开立日）批准后，
+        # 原本卡住的草稿应当立刻变成可批准，而不是保留落盘时的旧结论。
+        live_issues = document.get("issues", [])
+        live_approvable = document.get("approvable")
+        if document.get("status") == "pending":
+            live_issues, live_approvable = assess_draft(document, state, today=self.today_text())
         return {
             "id": document["id"],
             "status": document["status"],
@@ -773,9 +1017,9 @@ class LedgerDomain:
             ],
             "issues": [
                 {**issue, "message": project_text(state, issue.get("message", ""))}
-                for issue in document.get("issues", [])
+                for issue in live_issues
             ],
-            "approvable": document.get("approvable"),
+            "approvable": live_approvable,
             "createdAt": document.get("createdAt"),
             "approved": document.get("approved"),
             "rejected": document.get("rejected"),
@@ -830,11 +1074,15 @@ class LedgerDomain:
                     ),
                     "nextDue": account.get("nextDue"),
                     "status": account.get("status"),
+                    "coveredThrough": account.get("coveredThrough"),
+                    "unreconciled": account.get("unreconciled", False),
                     "closed": account["closed"],
                     "implicit": account["implicit"],
                 }
                 for account in accounts
             ],
             "pendingDrafts": pending,
+            "pendingOperations": self.list_operations(status="pending", limit=300),
+            "operations": self.operations.summary(),
             "recentDrafts": recent,
         }

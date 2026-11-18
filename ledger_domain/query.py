@@ -10,10 +10,11 @@ import io
 import re
 from typing import Any
 
+from .amounts import from_scaled, normalize_amount, to_scaled
 from .dates import is_date
 from .errors import fail
 from .ledger import project_name, resolve_name
-from .validation import run_process
+from .validation import DEFAULT_EXCLUDES, mirror_tree, run_process
 
 POSITION_RE = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s+([A-Z][A-Z0-9'._-]*)(.*)$")
 
@@ -165,3 +166,131 @@ def query_balances(
             continue
         balances.append({"account": project_name(state, row[columns["account"]]), **position})
     return {"asOf": as_of, "balances": balances}
+
+
+def query_account_balance(
+    *,
+    root: str,
+    bean_file: str,
+    executable: str,
+    account: str,
+    currency: str,
+    as_of: str,
+    overrides: dict[str, str] | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Return one account's accumulated position at ``as_of``.
+
+    When ``overrides`` is supplied the query runs against a disposable shadow
+    tree, which is how an update preview asks "what would the ledger say if the
+    block being replaced were not there?".
+    """
+    if not is_date(as_of):
+        fail("invalid_date", "asOf must be a YYYY-MM-DD date")
+    import os
+    import shutil
+    import tempfile
+    from pathlib import Path as _Path
+
+    root_path = _Path(root).resolve()
+    query = (
+        "SELECT account, currency, sum(position) WHERE "
+        f"account = '{account}' AND currency = '{currency}' AND date <= {as_of} "
+        "GROUP BY account, currency"
+    )
+    shadow = None
+    if overrides:
+        shadow = tempfile.mkdtemp(prefix="ledger-domain-query-")
+        try:
+            mirror_tree(
+                root_path,
+                shadow,
+                overrides=dict(overrides),
+                extra_files={},
+                excludes=set(DEFAULT_EXCLUDES),
+            )
+            rows = _run_query(
+                root=shadow,
+                bean_file=bean_file,
+                executable=executable,
+                query=query,
+                timeout=timeout,
+            )
+        finally:
+            shutil.rmtree(shadow, ignore_errors=True)
+    else:
+        rows = _run_query(
+            root=str(root_path),
+            bean_file=bean_file,
+            executable=executable,
+            query=query,
+            timeout=timeout,
+        )
+    if not rows:
+        return {"amount": "0.00", "currency": currency, "hasCost": False}
+    header = [name.strip() for name in rows[0]]
+    columns = {name: index for index, name in enumerate(header)}
+    amount_total = 0
+    has_cost = False
+    for row in rows[1:]:
+        position = parse_position(row[columns["sum(position)"]] if "sum(position)" in columns and columns["sum(position)"] < len(row) else "")
+        if position is None:
+            continue
+        amount_total += to_scaled(position["amount"])
+        if position.get("cost"):
+            has_cost = True
+    return {
+        "amount": from_scaled(amount_total, min_fraction_digits=2),
+        "currency": currency,
+        "hasCost": has_cost,
+    }
+
+
+def query_account_activity(
+    *,
+    root: str,
+    bean_file: str,
+    executable: str,
+    account: str,
+    currency: str,
+    date_from: str,
+    date_to: str,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Count and sum one account's postings in a date window."""
+    if not is_date(date_from) or not is_date(date_to):
+        fail("invalid_date", "activity bounds must be YYYY-MM-DD dates")
+    query = (
+        "SELECT date, position WHERE "
+        f"account = '{account}' AND currency = '{currency}' "
+        f"AND date >= {date_from} AND date <= {date_to}"
+    )
+    rows = _run_query(
+        root=root,
+        bean_file=bean_file,
+        executable=executable,
+        query=query,
+        timeout=timeout,
+    )
+    if not rows:
+        return {"count": 0, "inflow": "0.00", "outflow": "0.00"}
+    header = [name.strip() for name in rows[0]]
+    columns = {name: index for index, name in enumerate(header)}
+    count = 0
+    inflow = 0
+    outflow = 0
+    for row in rows[1:]:
+        position = parse_position(row[columns["position"]] if "position" in columns and columns["position"] < len(row) else "")
+        if position is None:
+            continue
+        count += 1
+        value = to_scaled(position["amount"])
+        if value > 0:
+            inflow += value
+        elif value < 0:
+            outflow += value
+    return {
+        "count": count,
+        "inflow": from_scaled(inflow, min_fraction_digits=2),
+        "outflow": from_scaled(outflow, min_fraction_digits=2),
+    }

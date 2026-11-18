@@ -52,6 +52,8 @@ def _account_summary(account: dict[str, Any]) -> dict[str, Any]:
         "period": account.get("period"),
         "nextDue": account.get("nextDue"),
         "status": account.get("status"),
+        "coveredThrough": account.get("coveredThrough"),
+        "unreconciled": account.get("unreconciled", False),
         "implicit": account.get("implicit", False),
     }
 
@@ -99,9 +101,26 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser("submit-draft")
     commands.add_parser("update-draft")
     commands.add_parser("account-open")
+    commands.add_parser("account-redate")
     commands.add_parser("approve-draft")
     commands.add_parser("reject-draft")
     commands.add_parser("quick-draft")
+    commands.add_parser("refresh-drafts")
+    commands.add_parser("op-approve-all")
+    commands.add_parser("approve-all-drafts")
+    commands.add_parser("op-submit")
+    op_list = commands.add_parser("op-list")
+    op_list.add_argument("--status", default=None)
+    op_list.add_argument("--limit", type=int, default=100)
+    op_get = commands.add_parser("op-get")
+    op_get.add_argument("operation_id")
+    commands.add_parser("op-approve")
+    commands.add_parser("op-reject")
+    commands.add_parser("reconcile-preview")
+    commands.add_parser("reconcile-commit")
+    reconcile_history = commands.add_parser("reconcile-history")
+    reconcile_history.add_argument("--account", default=None)
+    reconcile_history.add_argument("--limit", type=int, default=50)
     commands.add_parser("query-transactions")
     query_balances = commands.add_parser("query-balances")
     query_balances.add_argument("--as-of", default=None)
@@ -222,6 +241,44 @@ def _dispatch(args: argparse.Namespace, domain: LedgerDomain) -> Any:
             actor="panel" if payload.get("actor") == "panel" else "user",
         )
         return {"account": _account_summary(opened)}
+    if command == "account-redate":
+        payload = _read_payload()
+        date_text = payload.get("date")
+        if not isinstance(date_text, str):
+            fail("invalid_argument", "date is required")
+        accounts = payload.get("accounts")
+        if accounts is not None and not isinstance(accounts, list):
+            fail("invalid_argument", "accounts must be an array")
+        return domain.redate_accounts(
+            date_text=date_text,
+            accounts=[item for item in (accounts or []) if isinstance(item, str)],
+            all_accounts=payload.get("all") is True,
+        )
+    if command == "op-approve-all":
+        return domain.approve_all_operations(actor="panel")
+    if command == "approve-all-drafts":
+        return domain.approve_all_drafts(actor="panel")
+    if command == "refresh-drafts":
+        return domain.refresh_drafts()
+    if command == "op-submit":
+        stored = domain.submit_operation(_read_payload())
+        return {"operation": stored["operation"], "deduplicated": stored["deduplicated"]}
+    if command == "op-list":
+        return {"operations": domain.list_operations(status=args.status, limit=args.limit)}
+    if command == "op-get":
+        return {"operation": domain.get_operation(args.operation_id)}
+    if command == "op-approve":
+        payload = _read_payload()
+        operation_id = payload.get("id")
+        if not isinstance(operation_id, str):
+            fail("invalid_argument", "id is required")
+        return {"operation": domain.approve_operation(operation_id=operation_id, actor="panel" if payload.get("actor") == "panel" else "user")}
+    if command == "op-reject":
+        payload = _read_payload()
+        operation_id = payload.get("id")
+        if not isinstance(operation_id, str):
+            fail("invalid_argument", "id is required")
+        return {"operation": domain.reject_operation(operation_id=operation_id, reason=payload.get("reason") if isinstance(payload.get("reason"), str) else "", actor="panel" if payload.get("actor") == "panel" else "user")}
     if command == "approve-draft":
         payload = _read_payload()
         draft_id = payload.get("id")
@@ -235,8 +292,15 @@ def _dispatch(args: argparse.Namespace, domain: LedgerDomain) -> Any:
         return {
             "committed": result["committed"],
             "recovered": result["recovered"],
+            "autoPad": result.get("autoPad"),
             "draft": domain.project_draft(result["draft"]),
         }
+    if command == "reconcile-preview":
+        return domain.preview_reconciliation(_read_payload())
+    if command == "reconcile-commit":
+        return domain.commit_reconciliation(_read_payload())
+    if command == "reconcile-history":
+        return domain.reconcile_history(account=args.account, limit=args.limit)
     if command == "reject-draft":
         payload = _read_payload()
         draft_id = payload.get("id")

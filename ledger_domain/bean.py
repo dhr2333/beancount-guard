@@ -19,6 +19,7 @@ ACCOUNT_RE = re.compile(r"^[A-Z][A-Za-z0-9-]*(?::[A-Z][A-Za-z0-9-]*)+$")
 CURRENCY_RE = re.compile(r"^[A-Z][A-Z0-9'._-]{0,21}[A-Z0-9]$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-/.]{0,63}$")
 DATE_TEXT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 FLAG_RE = re.compile(r"^[*!&#?%PSTCURM]$")
 METADATA_RE = re.compile(r"^[ \t]+([A-Za-z][A-Za-z0-9_-]*)[ \t]*:[ \t]*(.*)$")
 OPEN_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})[ \t]+open[ \t]+(\S+)(.*)$")
@@ -243,6 +244,29 @@ def rewrite_open_metadata(content: str, account: str, values: dict[str, str | No
     return next_content, next_content != content
 
 
+def rewrite_open_date(content: str, account: str, date: str) -> tuple[str, bool]:
+    """Move one open directive to a new date, preserving the rest of the line.
+
+    Only the leading ``YYYY-MM-DD`` token changes; currencies, a trailing
+    comment, the metadata block and indentation are left exactly as they were.
+    """
+    if not DATE_TEXT_RE.match(date):
+        fail("invalid_date", "open date must be YYYY-MM-DD")
+    document = split_document(content)
+    lines = document.lines
+    location = find_open_directive(lines, account)
+    if location is None:
+        fail("account_not_found", f"no open directive for {account} in this file")
+    index = location["line_index"]
+    match = re.match(r"^([ \t]*)(\d{4}-\d{2}-\d{2})", lines[index])
+    if match is None:
+        fail("invalid_account", f"cannot locate the date token of the {account} open directive")
+    next_lines = list(lines)
+    next_lines[index] = f"{match.group(1)}{date}{lines[index][match.end():]}"
+    next_content = document.eol.join(next_lines)
+    return next_content, next_content != content
+
+
 def render_balance(assertion: dict[str, Any]) -> str:
     date = assertion["date"]
     if not DATE_TEXT_RE.match(date):
@@ -276,6 +300,12 @@ def render_transaction(transaction: dict[str, Any]) -> str:
         f"{quote(transaction.get('narration') or '')}{' ' + suffix if suffix else ''}"
     )
     lines = [header]
+    metadata = transaction.get("metadata")
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            if not isinstance(key, str) or METADATA_KEY_RE.match(key) is None:
+                fail("invalid_metadata", f'"{key}" is not a valid Beancount metadata key')
+            lines.append(f"  {key}: {quote(str(value))}")
     draft_id = transaction.get("draft_id")
     if isinstance(draft_id, str) and draft_id:
         lines.append(f"  draft_id: {quote(draft_id)}")

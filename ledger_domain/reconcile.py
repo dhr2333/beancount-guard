@@ -1,8 +1,13 @@
 """Reconciliation periods and status, rebuilt from the ledger on every call.
 
-No stored "due" flag exists: the anchor is the latest balance assertion (or the
-open date), the period comes from open-directive metadata, and the status
-follows from today. A restart cannot lose reconciliation state.
+No stored "due" flag exists: the anchor is the latest balance assertion, the
+period comes from open-directive metadata, and the status follows from today.
+A restart cannot lose reconciliation state.
+
+The next due date is the *last day of the next period*: add one period to the
+latest balance date (the assertion date) and move back one day. An account with
+no balance at all is not "scheduled": it has no baseline yet, so it is due
+immediately and shown as "unreconciled" in the UI.
 """
 
 from __future__ import annotations
@@ -10,9 +15,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from .dates import add_period, compare_date, diff_days, iso, is_period, parse_date
+from .dates import add_days, add_period, diff_days, iso, is_period, parse_date
 
 STATUS_RANK = {"overdue": 0, "due": 1, "scheduled": 2}
+RECONCILABLE_ROOTS = {"Assets", "Liabilities"}
+
+
+def _root(account: str) -> str:
+    return account.split(":", 1)[0]
 
 
 def reconciliation_of(
@@ -25,42 +35,59 @@ def reconciliation_of(
     period = account.get("period")
     if period in (None, "none") or not is_period(period):
         return None
+    if _root(account["account"]) not in RECONCILABLE_ROOTS:
+        return None
     close_date = account.get("closeDate")
     if close_date is not None and close_date <= iso(today):
         return None
 
-    balance = latest if latest is not None and latest["date"] <= iso(today) else None
-    anchor = balance["date"] if balance is not None else account["openDate"]
-    next_due = add_period(parse_date(anchor), period)
-    if next_due is None:
-        return None
-    to_due = diff_days(next_due, today)
-    if to_due > 0:
-        status = "scheduled"
-    elif to_due >= -grace_days:
+    last_balance = None
+    covered_through = None
+    unreconciled = latest is None
+    if latest is None:
+        anchor = account["openDate"]
+        next_due = today
+        days_until_due = 0
+        days_overdue = 0
         status = "due"
     else:
-        status = "overdue"
-    last_balance = None
-    if balance is not None:
+        balance_date = parse_date(latest["date"])
+        covered_through = iso(add_days(balance_date, -1))
+        anchor = latest["date"]
+        next_due_date = add_period(balance_date, period)
+        if next_due_date is None:
+            return None
+        next_due = add_days(next_due_date, -1)
+        to_due = diff_days(next_due, today)
+        if to_due > 0:
+            status = "scheduled"
+        elif to_due >= -grace_days:
+            status = "due"
+        else:
+            status = "overdue"
+        days_until_due = max(0, to_due)
+        days_overdue = max(0, -to_due)
         last_balance = {
-            "date": balance["date"],
-            "amount": balance["amount"],
-            "currency": balance["currency"],
-            "relFile": balance.get("rel_file") or balance.get("relFile"),
-            "line": balance.get("line"),
+            "date": latest["date"],
+            "amount": latest["amount"],
+            "currency": latest["currency"],
+            "relFile": latest.get("rel_file") or latest.get("relFile"),
+            "line": latest.get("line"),
         }
+
     return {
         "account": account["account"],
         "name": account["name"],
         "period": period,
         "anchorDate": anchor,
-        "anchorKind": "balance" if balance is not None else "open",
+        "anchorKind": "balance" if latest is not None else "open",
+        "coveredThrough": covered_through,
         "lastBalance": last_balance,
         "nextDue": iso(next_due),
         "status": status,
-        "daysUntilDue": to_due,
-        "daysOverdue": -to_due if to_due < 0 else 0,
+        "unreconciled": unreconciled,
+        "daysUntilDue": days_until_due,
+        "daysOverdue": days_overdue,
     }
 
 
@@ -90,7 +117,9 @@ def list_reconciliations(
 
 
 def count_reconciliations(reminders: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"due": 0, "overdue": 0, "scheduled": 0, "total": len(reminders)}
+    counts = {"due": 0, "overdue": 0, "scheduled": 0, "unreconciled": 0, "total": len(reminders)}
     for reminder in reminders:
         counts[reminder["status"]] += 1
+        if reminder.get("unreconciled"):
+            counts["unreconciled"] += 1
     return counts

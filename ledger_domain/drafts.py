@@ -109,6 +109,7 @@ def normalize_posting(
                     "code": "before_account_open",
                     "message": f"postings[{index}]: {account} opens on {opened['date']}, after the draft date",
                     "postingIndex": index,
+                    "account": account,
                 }
             )
         closed = state["closes"].get(account)
@@ -118,6 +119,7 @@ def normalize_posting(
                     "code": "closed_account",
                     "message": f"postings[{index}]: {account} is closed on the draft date",
                     "postingIndex": index,
+                    "account": account,
                 }
             )
     return {"account": account, "suggested": suggested, "amount": amount, "currency": currency}
@@ -391,6 +393,11 @@ class DraftStore:
         self.drafts_directory = self.state_directory / "drafts"
         self.audit_file = self.state_directory / "audit.jsonl"
         self.lock_file = self.state_directory / "write.lock"
+        # Optional hooks set by LedgerDomain: a late draft that would break a
+        # reconciliation balance can be absorbed by auto-inserting a pad. The
+        # hook returns extra candidate files; the finalizer records history.
+        self.approval_hook: Callable[..., dict[str, Any] | None] | None = None
+        self.approval_finalize: Callable[[dict[str, Any]], None] | None = None
 
     def today(self) -> str:
         return iso(today_in_zone(self.time_zone, self.now()))
@@ -596,10 +603,34 @@ class DraftStore:
                 timeout=self.timeout,
                 exclude=self.exclude_entries,
             )
+            extra_writes: dict[str, str] = {}
+            auto_pad: dict[str, Any] | None = None
+            if not validation["ok"] and self.approval_hook is not None:
+                hook_result = self.approval_hook(document, normalized, overrides, validation)
+                if hook_result and hook_result.get("error"):
+                    failure = hook_result["error"]
+                    fail(failure.get("code", "bean_check_failed"), failure.get("message", "the transaction was rejected"), failure.get("details") or {})
+                if hook_result and hook_result.get("writes"):
+                    merged = {**overrides, **hook_result["writes"]}
+                    retry = validate_ledger(
+                        root=self.root,
+                        main_file=self.reader.main_file,
+                        executable=executable,
+                        overrides=merged,
+                        timeout=self.timeout,
+                        exclude=self.exclude_entries,
+                    )
+                    if retry["ok"]:
+                        validation = retry
+                        overrides = merged
+                        extra_writes = dict(hook_result["writes"])
+                        auto_pad = hook_result.get("autoPad")
             if not validation["ok"]:
                 fail("bean_check_failed", f"the transaction was rejected by bean-check: {validation['diagnostic']}", {"diagnostic": validation["diagnostic"]})
 
             atomic_write(target["file"], next_content)
+            for rel_file, content in extra_writes.items():
+                atomic_write(self.root / rel_file, content)
             if target["index_changed"]:
                 atomic_write(target["index_file"], target["index_content"])
             approved = {
@@ -611,8 +642,10 @@ class DraftStore:
             }
             atomic_write(self.draft_file(draft_id), json.dumps(approved, ensure_ascii=False, indent=2) + "\n")
             self.audit("draft_approved", {"id": draft_id, "file": target["rel_file"], "line": line, "actor": actor})
+            if auto_pad is not None and self.approval_finalize is not None:
+                self.approval_finalize(auto_pad)
             self.reader.invalidate()
-            return {"draft": approved, "committed": True, "recovered": False}
+            return {"draft": approved, "committed": True, "recovered": False, "autoPad": auto_pad}
 
     def reject(self, *, draft_id: str, reason: str = "", actor: str = "user") -> dict[str, Any]:
         with write_lock(self.lock_file):
@@ -640,6 +673,52 @@ class DraftStore:
 
     def draft_file(self, draft_id: str) -> Path:
         return self.drafts_directory / f"{draft_id}.json"
+
+    def refresh_resolutions(self) -> dict[str, Any]:
+        """Re-resolve pending drafts against the current ledger.
+
+        A draft submitted before its funding account existed stores
+        ``account: null`` plus the raw ``suggested`` name. Once a structure
+        change is approved, those names may resolve; this rewrites only the
+        draft queue (never the ledger) so approval stops being blocked by stale
+        lookups.
+        """
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            today = self.today()
+            resolved = 0
+            touched = 0
+            for document in self.list(status="pending", limit=self.max_drafts):
+                postings = document.get("postings") or []
+                updated_postings = []
+                changed = False
+                for posting in postings:
+                    account = posting.get("account")
+                    if account is None:
+                        suggestion = posting.get("suggested")
+                        resolution = resolve_name(state, suggestion) if isinstance(suggestion, str) and suggestion else None
+                        if resolution is not None:
+                            updated_postings.append({**posting, "account": resolution["account"], "suggested": None})
+                            changed = True
+                            resolved += 1
+                            continue
+                    updated_postings.append(posting)
+                if not changed:
+                    continue
+                candidate = {**document, "postings": updated_postings}
+                issues, approvable = assess_draft(candidate, state, today=today)
+                rewritten = {
+                    **candidate,
+                    "hash": hash_payload(candidate),
+                    "issues": issues,
+                    "approvable": approvable,
+                    "updatedAt": _now(),
+                }
+                atomic_write(self.draft_file(document["id"]), json.dumps(rewritten, ensure_ascii=False, indent=2) + "\n")
+                touched += 1
+            if touched:
+                self.audit("drafts_resolved", {"drafts": touched, "postings": resolved})
+            return {"drafts": touched, "postings": resolved}
 
     def allocate_id(self, today: str) -> str:
         self.ensure_directories()

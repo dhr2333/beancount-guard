@@ -31,14 +31,24 @@ ledger.resolve_alias("工行5244")                 # → {"account": "Assets:...
 ledger.list_accounts()
 ledger.get_due_reconciliations()
 ledger.set_account_metadata(account="Assets:...", alias="工行5244", reconcile="monthly")
-ledger.submit_balance(account="工行5244", amount="0.00", currency="CNY")
-ledger.open_account(account="Assets:Savings:Bank:Ningbo", currencies=["CNY"], alias="宁波银行", reconcile="monthly")
+ledger.preview_reconciliation({"account": "工行5244", "asOf": "2026-11-30", "actual": "1000.00"})
+ledger.commit_reconciliation({...preview fields...})       # create / same-asOf update
+ledger.reconcile_history(account="工行5244")
+ledger.open_account(account="Assets:Savings:Bank:BOC0814", currencies=["CNY"], alias="中国银行 0814", reconcile="monthly")
 ledger.update_draft(draft_id="draft-...", payload={"payee": "星巴克"})
 ledger.submit_draft({...})                        # 入队，不写账本
 ledger.approve_draft(draft_id="draft-...")        # 校验 → 原子追加
 ledger.query_transactions(date_from="2026-10-01", date_to="2026-10-31")
 ledger.query_balances(as_of="2026-11-17")
 ```
+
+### 待办队列：人 vs Agent
+
+人在面板里点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。
+Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进
+操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` /
+`account-metadata` / `balance`）。批准结构变更时 Core 会自动重算待审草稿的账户解析，
+让原本卡在 `unresolved_account` 的草稿立刻可批。
 
 `LedgerError` 带 `code`、`message`、`details`；UI/CLI 直接展示 code 对应的本地化文案。
 
@@ -55,7 +65,7 @@ ledger.query_balances(as_of="2026-11-17")
 - `document/`
 - `.gitignore`、`README.md`
 
-起步账户包含现金、工资卡、支付宝、微信、信用卡、餐饮、交通、房租、购物、娱乐、医疗、其他支出、工资、其他收入、期初余额、调整；工资卡/信用卡默认按月对账。生成后先在临时目录运行 `bean-check`，通过后才 rename 到目标路径。
+起步账户包含现金、中国银行、支付宝、余额宝、微信、零钱通、招商银行、餐饮、交通、房租、购物、娱乐、医疗、其他支出、工资、其他收入、期初余额、调整；余额宝/零钱通默认按天对账。生成后先在临时目录运行 `bean-check`，通过后才 rename 到目标路径。
 
 ## 数据放在哪
 
@@ -86,7 +96,7 @@ stdout 固定为：
 {"ok": false, "error": {"code": "...", "message": "...", "details": {}}}
 ```
 
-业务失败也返回退出码 0；用法/内部错误返回 1。命令：`health`、`setup`、`init`、`bootstrap`、`status`、`accounts`、`resolve`、`due`、`metadata`、`account-open`、`balance`、`list-drafts`、`get-draft`、`submit-draft`、`update-draft`、`approve-draft`、`reject-draft`、`quick-draft`、`query-transactions`、`query-balances`、`validate`、`audit-metadata`。
+业务失败也返回退出码 0；用法/内部错误返回 1。命令：`health`、`setup`、`init`、`bootstrap`、`status`、`accounts`、`resolve`、`due`、`metadata`、`account-open`、`account-redate`、`balance`、`reconcile-preview`、`reconcile-commit`、`reconcile-history`、`refresh-drafts`、`approve-all-drafts`、`op-submit`、`op-list`、`op-get`、`op-approve`、`op-approve-all`、`op-reject`、`list-drafts`、`get-draft`、`submit-draft`、`update-draft`、`approve-draft`、`reject-draft`、`quick-draft`、`query-transactions`、`query-balances`、`validate`、`audit-metadata`。
 
 ## 运行时
 
@@ -115,11 +125,19 @@ cd ~/桌面/GitHub/ledger-domain-core
 
 测试在临时账本副本上覆盖：别名冲突回滚、对账重建、余额不一致零写入、草稿去重/批准/驳回、并发写串行化、月份 include 创建、隐式账户、崩溃恢复、查询投影。
 
+## 对账闭环
+
+- 到期：有 balance 时 `nextDue = add_period(balance.date) - 1 天`；没有 balance 时立即进待办，`unreconciled = true`，UI 显示"未对账"。
+- 预览/提交：`reconcile-preview` 返回 expected / difference / allocations / directives / hashes；`reconcile-commit` 在同一写门禁里原子写 `transaction* + pad? + balance`。
+- 更新：同一 `asOf` 再次提交走 `mode=update`，替换最近一次 block，旧历史 `superseded`；更早期间不可改。
+- 补记：对账后仍允许日期 ≤ asOf 的草稿。有 pad 时由 pad 吸收；没有 pad 时 `approve-draft` 自动往最近一次 block 插入 pad；自动补 pad 失败才返回 `reconcile_update_required`。
+- 历史：`.ledger/reconciliations/<id>.json`，记录 expected/actual/allocations/pad/balance/directives/hash/文件行，可回放、可审计。
+
 ## 已知限制
 
 - `init_ledger()` 只写入空目录；非空目录返回 `directory_not_empty`，不会覆盖现有文件。
 - 导入已有账本（选择目录/校验/接管）还没有做；当前需要把插件 `root` 指向已有账本。
-- 交易/对账只追加到 `trans/collect.bean` / `trans/reconciliation.bean`；文件不存在时报 `ledger_not_initialized`。
+- 交易/对账写入 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
 - `init_ledger()` 仍是旧的 16 账户/月度模板；MVP-0 用 `ledger-domain-assets`，初始化后续由 DSH 实现。
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
