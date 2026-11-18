@@ -1,6 +1,6 @@
 # ledger-domain-core
 
-Beancount 账本的**领域核心库**。它不包含界面、不启动服务、不依赖 DSH：UI、Agent 适配器、脚本都调用这一组 Python 函数，或通过同一份 JSON CLI 契约调用。
+Beancount 账本的**核心库**。它不包含界面、不启动服务、不依赖 DSH：UI、Agent 适配器、脚本都调用这一组 Python 函数，或通过同一份 JSON CLI 契约调用。
 
 ## 写入目标
 
@@ -14,9 +14,9 @@ Beancount 账本的**领域核心库**。它不包含界面、不启动服务、
 
 | 项目 | 根目录 | 职责 |
 |---|---|---|
-| 核心库 | `~/GitHub/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
-| 账本源 | `~/GitHub/ledger-domain-assets` | 只存 `.bean`、单据和账本资源，不放代码 |
-| DSH 插件 | `~/GitHub/dsh-ledger-domain` | 只做展示页，通过 CLI 调本库，不含领域逻辑 |
+| 核心库 | `~/ledger-domain/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
+| 账本源 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
+| DSH 插件 | `~/ledger-domain/dsh-ledger-domain` | 只做展示页，通过 CLI 调本库，不含账本规则 |
 
 ## 函数接口
 
@@ -72,7 +72,7 @@ Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-
 - 别名、对账周期：账本 `open` 指令的 metadata。
 - 对账到期日：每次从最近 `balance` 断言和周期重建，不落库。
 - 草稿、锁、审计：账本根目录的 `.ledger/`（运行态，已在账本源 `.gitignore`）。
-- 正式交易：审核批准后追加到 `YYYY/MM.bean`。
+- 正式交易：审核批准后追加到 `trans/collect.bean`；对账追加/替换 `trans/reconciliation.bean`。
 
 ## CLI 契约
 
@@ -119,8 +119,8 @@ DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安�
 ## 测试
 
 ```bash
-cd ~/桌面/GitHub/ledger-domain-core
-/home/daihaorui/桌面/GitHub/Assets/.venv/bin/python -m unittest discover -s tests -v
+cd ledger-domain-core
+PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
 测试在临时账本副本上覆盖：别名冲突回滚、对账重建、余额不一致零写入、草稿去重/批准/驳回、并发写串行化、月份 include 创建、隐式账户、崩溃恢复、查询投影。
@@ -138,11 +138,12 @@ cd ~/桌面/GitHub/ledger-domain-core
 - `init_ledger()` 只写入空目录；非空目录返回 `directory_not_empty`，不会覆盖现有文件。
 - 导入已有账本（选择目录/校验/接管）还没有做；当前需要把插件 `root` 指向已有账本。
 - 交易/对账写入 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
-- `init_ledger()` 仍是旧的 16 账户/月度模板；MVP-0 用 `ledger-domain-assets`，初始化后续由 DSH 实现。
+- `init_ledger()` 仍是旧的 16 账户/月度模板；MVP-0 用 `ledger-domain-assets`，新账本初始化由 DSH 插件实现（复制模板 → staging `bean-check` → 原子 rename）。
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
 - `bean-check`/`bean-query` 是外部程序；不导入 Beancount Python 包。
 - 托管引擎首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
+- 对账漂移（补记被 pad 吸收后历史 `expected` 与当前账本不一致）当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
 
 ## CI
 

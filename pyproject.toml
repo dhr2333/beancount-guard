@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ledger-domain"
 version = "0.1.0"
-description = "Thin Beancount domain layer: alias metadata, reconciliation periods, reviewed drafts, validated atomic writes"
+description = "Thin Beancount ledger core: alias metadata, reconciliation periods, reviewed drafts, validated atomic writes"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
