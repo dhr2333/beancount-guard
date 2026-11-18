@@ -25,7 +25,6 @@ def render_ledger(*, title: str, currency: str, year: str, today: str) -> dict[s
         "trans/main.bean": "; Beancount-Trans 写入的交易。main.bean 已 include 本文件。\n",
         ".gitignore": _gitignore(),
         "README.md": _readme(title),
-        "document/.gitkeep": "",
         f"{year}/00.bean": _year_index(),
     }
     for month in range(1, 13):
@@ -37,7 +36,6 @@ def _main(title: str, currency: str, year: str, today: str) -> str:
     return f"""; 1. 账本信息（结构遵循 Beancount-Trans-Assets）
 option "title" {quote(title)}
 option "operating_currency" {quote(currency)}
-option "documents" "document"
 
 {today} custom "fava-option" "language" "zh_CN"
 {today} custom "fava-option" "auto-reload" "true"
@@ -161,7 +159,7 @@ def _readme(title: str) -> str:
 
 - 备份：复制整个文件夹即可；也可以用 Git 或网盘同步。
 - 查看：`fava main.bean`，或在 Beancount-Trans 中打开。
-- 目录：`account/` 账户定义，`YYYY/MM.bean` 交易与对账，`trans/` 平台写入（已 gitignore），`.ledger/` 领域层运行态（已 gitignore）。
+- 目录：`account/` 账户定义，`YYYY/MM.bean` 交易与对账，`trans/` 平台写入（已 gitignore），`.ledger/` 运行态（草稿/锁/审计，已 gitignore）。
 
 不要把 `.bean` 文件交给某个云端服务独占；换工具时随时可以带走。
 """
@@ -169,4 +167,4 @@ def _readme(title: str) -> str:
 
 def template_files() -> dict[str, Any]:
     """Expose the template shape for documentation/tests."""
-    return {"layout": ["main.bean", "account/*.bean", "YYYY/00.bean", "trans/main.bean", "document/"]}
+    return {"layout": ["main.bean", "account/*.bean", "YYYY/00.bean", "trans/main.bean"]}
