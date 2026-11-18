@@ -16,7 +16,7 @@ Beancount 账本的**核心库**。它不包含界面、不启动服务、不依
 |---|---|---|
 | 核心库 | `~/ledger-domain/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
 | 账本源 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
-| DSH 插件 | `~/ledger-domain/dsh-ledger-domain` | 只做展示页，通过 CLI 调本库，不含账本规则 |
+| DSH 插件 | `~/ledger-domain/ledger` | 只做展示页，通过 CLI 调本库，不含账本规则 |
 
 ## 函数接口
 
