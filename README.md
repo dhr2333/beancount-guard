@@ -89,7 +89,7 @@ DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安�
 
 ## 写入门禁
 
-1. 候选内容写入影子树（未改动文件用 symlink，改动文件写真实副本）。
+1. 候选内容写入影子树（未改动文件用 symlink，改动文件写真实副本；Windows 无 symlink 权限时自动退化为复制）。
 2. 在影子树运行真实的 `bean-check`。
 3. 通过后，在 `.ledger/write.lock` 锁内 `os.replace` 原子替换目标文件。
 4. 失败时返回 `bean_check_failed` / `balance_mismatch`，原文件零改动。

@@ -10,6 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from ledger_domain import LedgerError, create_ledger_domain
 from ledger_domain.bean import render_transaction
@@ -669,6 +670,11 @@ class DomainTest(unittest.TestCase):
         self.assertIn("balance Assets:Bank:Test -30.00 CNY", reconciliation)
         self.assertIn("balance Assets:Bank:Unmapped 0.00 CNY", reconciliation)
         self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_validation_falls_back_to_copies_when_symlinks_are_forbidden(self) -> None:
+        denied = OSError(1314, "客户端没有所需的特权")
+        with mock.patch("os.symlink", side_effect=denied):
+            self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
     def test_missing_reconciliation_target_is_refused(self) -> None:
         (self.fixture.root / "trans/reconciliation.bean").unlink()

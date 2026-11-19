@@ -179,7 +179,7 @@ def mirror_tree(
     extra_files: dict[str, str],
     excludes: set[str],
 ) -> None:
-    """Mirror the real ledger with symlinks, writing only overridden paths."""
+    """Mirror the real ledger with symlinks where allowed, writing only overridden paths."""
     root_path = Path(root)
     shadow_path = Path(shadow)
     needed_dirs: set[str] = set()
@@ -207,21 +207,37 @@ def mirror_tree(
             if rel in extra_files:
                 continue
             if entry.is_symlink():
-                os.symlink(real_path, target)
+                _link_or_copy(real_path, target, directory=entry.is_dir())
             elif entry.is_dir():
                 if rel in needed_dirs:
                     target.mkdir(parents=True, exist_ok=True)
                     visit(real_path, target, rel)
                 else:
-                    os.symlink(real_path, target, target_is_directory=True)
+                    _link_or_copy(real_path, target, directory=True)
             elif entry.is_file():
-                os.symlink(real_path, target)
+                _link_or_copy(real_path, target)
 
     visit(root_path, shadow_path, "")
     for rel, content in [*overrides.items(), *extra_files.items()]:
         target = shadow_path / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+
+def _link_or_copy(real_path: Path, target: Path, *, directory: bool = False) -> None:
+    """Mirror one entry by symlink, falling back to a copy where links are forbidden.
+
+    Windows rejects ``os.symlink`` without Developer Mode or the
+    ``SeCreateSymbolicLinkPrivilege`` (``WinError 1314``); the shadow only needs
+    equivalent content, so a copy keeps validation working there.
+    """
+    try:
+        os.symlink(real_path, target, target_is_directory=directory)
+    except OSError:
+        if directory:
+            shutil.copytree(real_path, target, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+        else:
+            shutil.copy2(real_path, target)
 
 
 def atomic_write(file: str | Path, content: str) -> None:
