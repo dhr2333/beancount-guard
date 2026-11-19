@@ -55,13 +55,23 @@ def resolve_program(root: str | Path, configured: str | None, name: str) -> str:
                 return str(candidate)
         else:
             return value
-    local = Path(root) / ".venv" / "bin" / name
+    local = Path(root) / ".venv" / _venv_bin_dir() / f"{name}{_program_suffix()}"
     if local.exists():
         return str(local)
-    sibling = Path(sys.executable).with_name(name)
+    sibling = Path(sys.executable).with_name(f"{name}{_program_suffix()}")
     if sibling.exists():
         return str(sibling)
     return name
+
+
+def _venv_bin_dir() -> str:
+    """The program directory a virtualenv uses on this platform."""
+    return "Scripts" if os.name == "nt" else "bin"
+
+
+def _program_suffix() -> str:
+    """The executable suffix a virtualenv program has on this platform."""
+    return ".exe" if os.name == "nt" else ""
 
 
 def run_process(command: str, args: list[str], cwd: str | Path, timeout: float = 60.0) -> dict[str, Any]:
