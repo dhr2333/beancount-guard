@@ -8,7 +8,7 @@ Beancount 账本的**核心库**。它不包含界面、不启动服务、不依
 - 对账：`trans/reconciliation.bean`
 - `trans/main.bean` 只 include 上述两个文件，不写交易。
 - 不再按 `YYYY/MM.bean` 分月写入。
-- Core 负责整个账本写入；`init-ledger` 暂保留，MVP-0 从 `ledger-domain-assets` 已有账本开始。
+- Core 负责整个账本写入；新账本从 `ledger-domain-assets` 模板开始。
 
 ## 三个独立项目
 
@@ -44,28 +44,9 @@ ledger.query_balances(as_of="2026-11-17")
 
 ### 待办队列：人 vs Agent
 
-人在面板里点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。
-Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进
-操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` /
-`account-metadata` / `balance`）。批准结构变更时 Core 会自动重算待审草稿的账户解析，
-让原本卡在 `unresolved_account` 的草稿立刻可批。
+人在面板里点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` / `account-metadata` / `balance`）。批准结构变更时 Core 会自动重算待审草稿的账户解析，让原本卡在 `unresolved_account` 的草稿立刻可批。
 
 `LedgerError` 带 `code`、`message`、`details`；UI/CLI 直接展示 code 对应的本地化文案。
-
-## 新账本模板（legacy，不在 MVP-0）
-
-> MVP-0 直接使用 `ledger-domain-assets`；初始化后续由 DSH 实现。以下 `init_ledger()` 是旧模板，保留但不在 MVP-0 验收。
-
-`init_ledger()` 使用 **Beancount-Trans-Assets 的目录约定和科目命名**，但只带一份干净的起步模板：
-
-- `main.bean`
-- `account/{assets,liabilities,expenses,income,equity}.bean`
-- 当前年份 `YYYY/00.bean` + 12 个月度文件
-- `trans/main.bean`
-- `document/`
-- `.gitignore`、`README.md`
-
-起步账户包含现金、中国银行、支付宝、余额宝、微信、零钱通、招商银行、餐饮、交通、房租、购物、娱乐、医疗、其他支出、工资、其他收入、期初余额、调整；余额宝/零钱通默认按天对账。生成后先在临时目录运行 `bean-check`，通过后才 rename 到目标路径。
 
 ## 数据放在哪
 
@@ -80,9 +61,6 @@ Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-
 
 ```bash
 python -m ledger_domain --root /path/to/ledger setup
-python -m ledger_domain --root /path/to/ledger init <<'JSON'
-{"title": "我的账本", "currency": "CNY"}
-JSON
 python -m ledger_domain --root /path/to/ledger bootstrap
 python -m ledger_domain --root /path/to/ledger balance <<'JSON'
 {"account": "工行5244", "amount": "-30.00", "currency": "CNY"}
@@ -105,9 +83,9 @@ stdout 固定为：
 - `bean-check` 来自 `beancount`
 - `bean-query` 来自 `beanquery`
 
-查找顺序：显式配置路径 → 账本 `.venv/bin` → **当前解释器同目录** → PATH。最后一项让“托管引擎”里的核心库直接找到同一个 venv 的 Beancount 命令，不需要再配置 `beanCheck`。
+查找顺序：显式配置路径 → 账本 `.venv/bin` → **当前解释器同目录** → PATH。最后一项让「托管引擎」里的核心库直接找到同一个 venv 的 Beancount 命令，不需要再配置 `beanCheck`。
 
-DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安装/修复）；核心库本身不关心安装方式。插件托管安装需要系统 Python 3.11+、网络与核心库源码路径；发行版应把核心库作为依赖一并分发。
+DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安装/修复）；核心库本身不关心安装方式。发行版应把核心库作为依赖一并分发。
 
 ## 写入门禁
 
@@ -123,27 +101,26 @@ cd ledger-domain-core
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-测试在临时账本副本上覆盖：别名冲突回滚、对账重建、余额不一致零写入、草稿去重/批准/驳回、并发写串行化、月份 include 创建、隐式账户、崩溃恢复、查询投影。
+测试在临时账本副本上覆盖：别名冲突、对账重建、余额不一致零写入、草稿流转、并发写、崩溃恢复、查询投影。
 
 ## 对账闭环
 
-- 到期：有 balance 时 `nextDue = add_period(balance.date) - 1 天`；没有 balance 时立即进待办，`unreconciled = true`，UI 显示"未对账"。
+- 到期：有 balance 时 `nextDue = add_period(balance.date) - 1 天`；没有 balance 时立即进待办，`unreconciled = true`。
 - 预览/提交：`reconcile-preview` 返回 expected / difference / allocations / directives / hashes；`reconcile-commit` 在同一写门禁里原子写 `transaction* + pad? + balance`。
 - 更新：同一 `asOf` 再次提交走 `mode=update`，替换最近一次 block，旧历史 `superseded`；更早期间不可改。
-- 补记：对账后仍允许日期 ≤ asOf 的草稿。有 pad 时由 pad 吸收；没有 pad 时 `approve-draft` 自动往最近一次 block 插入 pad；自动补 pad 失败才返回 `reconcile_update_required`。
+- 补记：对账后仍允许日期 ≤ asOf 的草稿。有 pad 时被吸收；没有 pad 时 `approve-draft` 自动往最近一次 block 插入 pad；自动补 pad 失败才返回 `reconcile_update_required`。
 - 历史：`.ledger/reconciliations/<id>.json`，记录 expected/actual/allocations/pad/balance/directives/hash/文件行，可回放、可审计。
 
 ## 已知限制
 
-- `init_ledger()` 只写入空目录；非空目录返回 `directory_not_empty`，不会覆盖现有文件。
+- `init_ledger()` 仍是旧模板，只写空目录；新账本初始化由 DSH 插件复制 `ledger-domain-assets` 实现。
 - 导入已有账本（选择目录/校验/接管）还没有做；当前需要把插件 `root` 指向已有账本。
-- 交易/对账写入 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
-- `init_ledger()` 仍是旧的 16 账户/月度模板；MVP-0 用 `ledger-domain-assets`，新账本初始化由 DSH 插件实现（复制模板 → staging `bean-check` → 原子 rename）。
+- 交易/对账写 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
-- `bean-check`/`bean-query` 是外部程序；不导入 Beancount Python 包。
+- `bean-check` / `bean-query` 是外部程序；不导入 Beancount Python 包。
 - 托管引擎首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
-- 对账漂移（补记被 pad 吸收后历史 `expected` 与当前账本不一致）当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
+- 对账漂移当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
 
 ## CI
 
