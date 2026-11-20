@@ -1,6 +1,6 @@
 """CLI contract tests for the DSH bridge.
 
-The panel does not import the package; it executes ``python -m ledger_domain``.
+The panel does not import the package; it executes ``python -m beancount_guard``.
 These tests pin that JSON-in/JSON-out surface.
 """
 
@@ -55,7 +55,7 @@ class CliTest(unittest.TestCase):
             [
                 sys.executable,
                 "-m",
-                "ledger_domain",
+                "beancount_guard",
                 "--root",
                 str(self.root),
                 "--bean-check",

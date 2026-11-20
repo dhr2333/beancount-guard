@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-import ledger_domain
-from ledger_domain import LedgerError, create_ledger_domain
-from ledger_domain.bean import render_transaction
-from ledger_domain.validation import (
+import beancount_guard
+from beancount_guard import LedgerError, create_beancount_guard
+from beancount_guard.bean import render_transaction
+from beancount_guard.validation import (
     atomic_write,
     mirror_tree,
     remove_tree,
@@ -94,7 +94,7 @@ class Fixture:
         (self.root / "trans/reconciliation.bean").write_text("; reconciliation\n", encoding="utf-8")
 
     def domain(self):
-        return create_ledger_domain(
+        return create_beancount_guard(
             root=self.root,
             bean_check=BEAN_CHECK,
             bean_query=BEAN_QUERY,
@@ -128,7 +128,7 @@ class DomainTest(unittest.TestCase):
         parent = Path(tempfile.mkdtemp(prefix="ledger-domain-init-"))
         self.addCleanup(shutil.rmtree, parent, True)
         root = parent / "我的账本"
-        ledger = create_ledger_domain(root=root, now=lambda: NOW)
+        ledger = create_beancount_guard(root=root, now=lambda: NOW)
         self.assertFalse(ledger.setup()["initialized"])
         result = ledger.init_ledger(title="测试账本", currency="CNY")
         self.assertTrue(result["validated"])
@@ -149,7 +149,7 @@ class DomainTest(unittest.TestCase):
         parent = Path(tempfile.mkdtemp(prefix="ledger-domain-init-"))
         self.addCleanup(shutil.rmtree, parent, True)
         parent.joinpath("keep.txt").write_text("x", encoding="utf-8")
-        ledger = create_ledger_domain(root=parent, now=lambda: NOW)
+        ledger = create_beancount_guard(root=parent, now=lambda: NOW)
         self.assert_code("directory_not_empty", lambda: ledger.init_ledger(title="测试"))
 
     # ---------------------------------------------------------------- read side
@@ -237,7 +237,7 @@ class DomainTest(unittest.TestCase):
         self.assertIn("未映射卡", file.read_text(encoding="utf-8"))
         self.assertEqual(self.ledger.resolve_alias("工行卡")["account"], "Assets:Bank:Unmapped")
 
-        fresh = create_ledger_domain(
+        fresh = create_beancount_guard(
             root=self.fixture.root, bean_check=BEAN_CHECK, bean_query=BEAN_QUERY, now=lambda: NOW
         )
         self.assertEqual(fresh.resolve_alias("工行卡")["account"], "Assets:Bank:Unmapped")
@@ -898,7 +898,7 @@ class ReconciliationTest(unittest.TestCase):
         self.assertTrue(self.ledger.validate()["ok"])
 
     def test_expense_cannot_get_a_reconcile_period(self) -> None:
-        from ledger_domain import LedgerError
+        from beancount_guard import LedgerError
 
         with self.assertRaises(LedgerError) as caught:
             self.ledger.set_account_metadata(account="Expenses:Food", reconcile="monthly")
@@ -1035,11 +1035,11 @@ class ContractTest(unittest.TestCase):
         text = (project / "pyproject.toml").read_text(encoding="utf-8")
         declared = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
         self.assertIsNotNone(declared)
-        self.assertEqual(declared.group(1), ledger_domain.__version__)
+        self.assertEqual(declared.group(1), beancount_guard.__version__)
 
     def test_protocol_is_a_positive_integer(self) -> None:
-        self.assertIsInstance(ledger_domain.PROTOCOL, int)
-        self.assertGreaterEqual(ledger_domain.PROTOCOL, 1)
+        self.assertIsInstance(beancount_guard.PROTOCOL, int)
+        self.assertGreaterEqual(beancount_guard.PROTOCOL, 1)
 
 
 if __name__ == "__main__":

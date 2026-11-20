@@ -393,7 +393,7 @@ class DraftStore:
         self.drafts_directory = self.state_directory / "drafts"
         self.audit_file = self.state_directory / "audit.jsonl"
         self.lock_file = self.state_directory / "write.lock"
-        # Optional hooks set by LedgerDomain: a late draft that would break a
+        # Optional hooks set by BeancountGuard: a late draft that would break a
         # reconciliation balance can be absorbed by auto-inserting a pad. The
         # hook returns extra candidate files; the finalizer records history.
         self.approval_hook: Callable[..., dict[str, Any] | None] | None = None

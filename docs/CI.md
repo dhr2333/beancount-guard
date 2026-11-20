@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| Jenkins job | `ledger-domain-core` |
+| Jenkins job | `beancount-guard` |
 | 触发 | GitHub `push` / `pull_request` |
 | Webhook | `https://jenkins.dhr2333.cn/github-webhook/` |
 | Script Path | `Jenkinsfile` |
@@ -17,9 +17,9 @@
 1. checkout 当前 commit；
 2. 把工作区 tar 流送进 Python 3.12 容器；
 3. 安装 `beancount==3.2.3` 与 `beanquery==0.2.0`；
-4. `python -m compileall -q ledger_domain`；
+4. `python -m compileall -q beancount_guard`；
 5. `python -m unittest discover -s tests -v`（全部在临时账本副本上运行）；
-6. `python -m ledger_domain --root /workspace health` 冒烟。
+6. `python -m beancount_guard --root /workspace health` 冒烟。
 
 不访问真实账本，不写用户目录，构建产物只有日志。
 
@@ -27,9 +27,9 @@
 
 ```bash
 python -m pip install "beancount==3.2.3" "beanquery==0.2.0"
-python -m compileall -q ledger_domain
+python -m compileall -q beancount_guard
 PYTHONPATH=. python -m unittest discover -s tests -v
-PYTHONPATH=. python -m ledger_domain --root . health
+PYTHONPATH=. python -m beancount_guard --root . health
 ```
 
 ## 凭据

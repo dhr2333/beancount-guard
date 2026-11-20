@@ -1,6 +1,6 @@
 """Local read-only MCP server for the ledger skills.
 
-Run as ``python -m ledger_domain.mcp_server --root /path/to/ledger``. The
+Run as ``python -m beancount_guard.mcp_server --root /path/to/ledger``. The
 server exposes the same tool/resource names as the former Backend MCP so the
 existing ``ledger-overview`` / ``monthly-review`` / ``insight-review`` skills
 keep working unchanged.
@@ -18,7 +18,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
 from .bql import BqlError, run_bql as execute_bql
-from .core import create_ledger_domain
+from .core import create_beancount_guard
 
 MAX_ROWS = 100
 MAX_FILE_BYTES = 1_048_576
@@ -51,7 +51,7 @@ class LocalLedger:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.main = self.root / "main.bean"
-        self.domain = create_ledger_domain(root=self.root)
+        self.domain = create_beancount_guard(root=self.root)
 
     def relative(self, path: str) -> Path:
         raw = (path or "").strip()

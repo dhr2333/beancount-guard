@@ -7,7 +7,7 @@ The design baseline is v0.18. This repository now implements:
 - fixed append targets `trans/collect.bean` / `trans/reconciliation.bean`;
 - draft `update-draft`;
 - `account-open`;
-- the local read-only MCP server (`ledger_domain.mcp_server`) with BQL;
+- the local read-only MCP server (`beancount_guard.mcp_server`) with BQL;
 - the MVP-1 reconciliation closed loop: due/unreconciled, preview/commit, same-as_of update, history, auto-pad on late drafts, 41 core tests.
 
 Still out: initialization (DSH later), `account-close`, reconcile revoke (explicitly not done), month-end batch (explicitly not done), multi-currency (not planned).

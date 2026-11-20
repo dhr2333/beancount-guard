@@ -6,7 +6,7 @@ itself is the confirmation, so they take effect directly. When an Agent proposes
 them there is no human in the loop yet, so they have to park here and wait.
 
 This module only owns the queue and its state. The actual write is still done by
-the matching ``LedgerDomain`` method at approval time, which is what keeps the
+the matching ``BeancountGuard`` method at approval time, which is what keeps the
 shadow-tree validation and the write lock in one place.
 """
 

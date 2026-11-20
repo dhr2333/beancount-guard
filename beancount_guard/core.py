@@ -1,13 +1,13 @@
-"""The ledger domain's function interface.
+"""The guard's function interface.
 
 UI, agent adapters and scripts call this object, never the ``.bean`` files:
 aliases resolve on the way in, names project on the way out, and every ledger
 mutation goes through one validated, locked append.
 
-    from ledger_domain import create_ledger_domain
-    ledger = create_ledger_domain(root="/path/to/ledger")
-    ledger.get_due_reconciliations()
-    ledger.submit_balance(account="工行5244", amount="-30.00", currency="CNY")
+    from beancount_guard import create_beancount_guard
+    guard = create_beancount_guard(root="/path/to/ledger")
+    guard.get_due_reconciliations()
+    guard.submit_balance(account="工行5244", amount="-30.00", currency="CNY")
 """
 
 from __future__ import annotations
@@ -60,12 +60,12 @@ from .validation import atomic_write, resolve_program, validate_ledger, write_lo
 UNSET = object()
 
 
-def create_ledger_domain(**options: Any) -> "LedgerDomain":
-    return LedgerDomain(**options)
+def create_beancount_guard(**options: Any) -> "BeancountGuard":
+    return BeancountGuard(**options)
 
 
-class LedgerDomain:
-    """Domain client over one ledger root."""
+class BeancountGuard:
+    """Client over one ledger root."""
 
     def __init__(
         self,
@@ -94,7 +94,7 @@ class LedgerDomain:
         self.grace_days = grace_days if isinstance(grace_days, int) and grace_days >= 0 else 3
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else 60.0
-        self.exclude_entries = exclude_entries or ["ledger-domain", "ledger_domain"]
+        self.exclude_entries = exclude_entries or ["beancount-guard", "beancount_guard"]
         self.reader = LedgerReader(self.root, bean_file)
         self.drafts = DraftStore(
             root=self.root,

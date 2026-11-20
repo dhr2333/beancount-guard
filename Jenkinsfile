@@ -1,6 +1,6 @@
 #!/usr/bin/env groovy
 
-// ledger-domain-core CI — triggered by the GitHub webhook, tested in a throwaway
+// beancount-guard CI — triggered by the GitHub webhook, tested in a throwaway
 // Python container that installs Beancount/beanquery but never a real ledger.
 // Server-side steps mirror LedgerKernel's docs/CI.md.
 
@@ -39,9 +39,9 @@ pipeline {
                           cd /workspace
                           python -m pip install --disable-pip-version-check \
                             "beancount==3.2.3" "beanquery==0.2.0"
-                          python -m compileall -q ledger_domain
+                          python -m compileall -q beancount_guard
                           PYTHONPATH=/workspace python -m unittest discover -s tests -v
-                          PYTHONPATH=/workspace python -m ledger_domain --root /workspace health
+                          PYTHONPATH=/workspace python -m beancount_guard --root /workspace health
                         '
                 '''
             }
@@ -67,10 +67,10 @@ pipeline {
 
     post {
         success {
-            echo '✅ ledger-domain-core CI 通过'
+            echo '✅ beancount-guard CI 通过'
         }
         failure {
-            echo '❌ ledger-domain-core CI 失败，请查看测试日志'
+            echo '❌ beancount-guard CI 失败，请查看测试日志'
         }
         always {
             cleanWs()

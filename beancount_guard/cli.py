@@ -1,10 +1,10 @@
-"""JSON command-line adapter for the ledger domain.
+"""JSON command-line adapter for beancount-guard.
 
-One process, one command, one JSON envelope on stdout. The DSH panel bridge
-treats this as a transport and does no domain work itself.
+One process, one command, one JSON envelope on stdout. A frontend bridge treats
+this as a transport and does no ledger work itself.
 
-    python -m ledger_domain --root /path/to/ledger bootstrap
-    python -m ledger_domain --root /path/to/ledger balance <<'JSON'
+    python -m beancount_guard --root /path/to/ledger bootstrap
+    python -m beancount_guard --root /path/to/ledger balance <<'JSON'
     {"account": "工行5244", "amount": "-30.00", "currency": "CNY"}
     JSON
 """
@@ -19,7 +19,7 @@ from importlib import metadata
 from typing import Any
 
 from . import PROTOCOL, __version__
-from .core import LedgerDomain, create_ledger_domain
+from .core import BeancountGuard, create_beancount_guard
 from .errors import LedgerError, fail
 
 
@@ -43,7 +43,7 @@ def _core_version() -> str:
     version of the files actually imported, not a hand-copied string.
     """
     try:
-        return metadata.version("ledger-domain")
+        return metadata.version("beancount-guard")
     except metadata.PackageNotFoundError:
         return __version__
 
@@ -73,7 +73,7 @@ def _account_summary(account: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ledger-domain", description="Beancount ledger domain core")
+    parser = argparse.ArgumentParser(prog="beancount-guard", description="Beancount write guard and reconciliation core")
     parser.add_argument("--root", default=os.environ.get("LEDGER_ROOT") or os.getcwd(), help="ledger root containing main.bean")
     parser.add_argument("--bean-file", default="main.bean")
     parser.add_argument("--state-dir", default=".ledger")
@@ -141,8 +141,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _domain(args: argparse.Namespace) -> LedgerDomain:
-    return create_ledger_domain(
+def _domain(args: argparse.Namespace) -> BeancountGuard:
+    return create_beancount_guard(
         root=args.root,
         bean_file=args.bean_file,
         state_dir=args.state_dir,
@@ -154,7 +154,7 @@ def _domain(args: argparse.Namespace) -> LedgerDomain:
     )
 
 
-def _dispatch(args: argparse.Namespace, domain: LedgerDomain) -> Any:
+def _dispatch(args: argparse.Namespace, domain: BeancountGuard) -> Any:
     command = args.command
     if command == "health":
         return {

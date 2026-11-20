@@ -35,8 +35,8 @@ DEFAULT_EXCLUDES = {
     "__pycache__",
     ".DS_Store",
     ".trae",
-    "ledger-domain",
-    "ledger_domain",
+    "beancount-guard",
+    "beancount_guard",
 }
 
 # Shadow trees this module leaves in the temp directory, and how old they are.
@@ -144,7 +144,7 @@ def validate_ledger(
     extra_files = dict(extra_files or {})
 
     if pending_directive and pending_directive.strip():
-        pending_rel = "__ledger_domain_pending__.bean"
+        pending_rel = "__beancount_guard_pending__.bean"
         include_spec = posixpath.relpath(pending_rel, posixpath.dirname(main_rel) or ".")
         base = overrides.get(main_rel)
         if base is None:

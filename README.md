@@ -1,6 +1,6 @@
-# ledger-domain-core
+# beancount-guard
 
-Beancount 账本的**核心库**。它不包含界面、不启动服务、不依赖 DSH：UI、Agent 适配器、脚本都调用这一组 Python 函数，或通过同一份 JSON CLI 契约调用。
+Beancount 账本的**写入守卫与对账内核**：校验后原子写入、别名/周期治理、对账闭环、只读 BQL/MCP。不绑定任何 UI——不包含界面、不启动服务、不依赖特定前端；任何前端（Fava、Obsidian 插件、脚本、Agent）都调用同一组 Python 函数，或通过同一份 JSON CLI 契约调用。
 
 ## 写入目标
 
@@ -8,37 +8,39 @@ Beancount 账本的**核心库**。它不包含界面、不启动服务、不依
 - 对账：`trans/reconciliation.bean`
 - `trans/main.bean` 只 include 上述两个文件，不写交易。
 - 不再按 `YYYY/MM.bean` 分月写入。
-- Core 负责整个账本写入；新账本从 `ledger-domain-assets` 模板开始。
+- 本库负责整个账本写入；新账本从模板仓库开始。
 
-## 三个独立项目
+## 与其他项目的关系
 
 | 项目 | 根目录 | 职责 |
 |---|---|---|
-| 核心库 | `~/ledger-domain/ledger-domain-core` | 本仓库：别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
-| 账本源 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
-| DSH 插件 | `~/ledger-domain/dsh-ledger` | 只做展示页，通过 CLI 调本库，不含账本规则 |
+| 写入守卫（本仓库） | `~/ledger-domain/beancount-guard` | 别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
+| 账本模板 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
+| DSH 面板 | `~/ledger-domain/dsh-ledger` | 可选前端之一，只做展示，通过 CLI 调本库 |
+
+前端可替换：本库不认识 DSH，只提供 CLI JSON 信封与 MCP 工具集。
 
 ## 独立安装（不依赖任何前端）
 
-核心库发布在 PyPI，任何前端（Fava、Obsidian 插件、脚本、Agent）都可以直接使用：
+发布在 PyPI，任何前端都可以直接使用：
 
 ```bash
-pip install ledger-domain
-python -m ledger_domain --root /path/to/ledger status     # JSON CLI
-python -m ledger_domain --root /path/to/ledger health     # version + protocol
-python -m ledger_domain.mcp_server                        # 只读 MCP
+pip install beancount-guard
+python -m beancount_guard --root /path/to/ledger status     # JSON CLI
+python -m beancount_guard --root /path/to/ledger health     # version + protocol
+python -m beancount_guard.mcp_server                        # 只读 MCP
 ```
 
-- `ledger_domain.PROTOCOL` 是 CLI/MCP 契约版本：只有破坏性变更才 +1，前端据此判断兼容性。
-- `health` 返回 `{"version": "<安装版本>", "protocol": 1, ...}`；DSH 插件用它和 PyPI 上的最新版本比较，决定是否提示升级。
+- `beancount_guard.PROTOCOL` 是 CLI/MCP 契约版本：只有破坏性变更才 +1，前端据此判断兼容性。
+- `health` 返回 `{"version": "<安装版本>", "protocol": 1, ...}`；前端用它和 PyPI 上的最新版本比较，决定是否提示升级。
 - 前端不得依赖私有实现：只用 CLI JSON 信封、MCP 工具集和这两个字段。
 
 ## 函数接口
 
 ```python
-from ledger_domain import create_ledger_domain
+from beancount_guard import create_beancount_guard
 
-ledger = create_ledger_domain(root="/home/dhr2333/Documents/账本-mvp")
+ledger = create_beancount_guard(root="/home/dhr2333/Documents/账本-mvp")
 
 ledger.setup()                                    # 是否已有 main.bean
 ledger.init_ledger(title="我的账本", currency="CNY")  # 生成新账本并 bean-check
@@ -59,7 +61,7 @@ ledger.query_balances(as_of="2026-11-17")
 
 ### 待办队列：人 vs Agent
 
-人在面板里点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` / `account-metadata` / `balance`）。批准结构变更时 Core 会自动重算待审草稿的账户解析，让原本卡在 `unresolved_account` 的草稿立刻可批。
+人在界面上点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` / `account-metadata` / `balance`）。批准结构变更时本库会自动重算待审草稿的账户解析，让原本卡在 `unresolved_account` 的草稿立刻可批。
 
 `LedgerError` 带 `code`、`message`、`details`；UI/CLI 直接展示 code 对应的本地化文案。
 
@@ -75,9 +77,9 @@ ledger.query_balances(as_of="2026-11-17")
 任何语言都可以通过子进程调用：
 
 ```bash
-python -m ledger_domain --root /path/to/ledger setup
-python -m ledger_domain --root /path/to/ledger bootstrap
-python -m ledger_domain --root /path/to/ledger balance <<'JSON'
+python -m beancount_guard --root /path/to/ledger setup
+python -m beancount_guard --root /path/to/ledger bootstrap
+python -m beancount_guard --root /path/to/ledger balance <<'JSON'
 {"account": "工行5244", "amount": "-30.00", "currency": "CNY"}
 JSON
 ```
@@ -93,14 +95,14 @@ stdout 固定为：
 
 ## 运行时
 
-核心库只依赖标准库；校验和查询调用外部程序：
+本库只依赖标准库；校验和查询调用外部程序：
 
 - `bean-check` 来自 `beancount`
 - `bean-query` 来自 `beanquery`
 
-查找顺序：显式配置路径 → 账本 `.venv/bin` → **当前解释器同目录** → PATH。最后一项让「托管引擎」里的核心库直接找到同一个 venv 的 Beancount 命令，不需要再配置 `beanCheck`。
+查找顺序：显式配置路径 → 账本 `.venv/bin` → **当前解释器同目录** → PATH。最后一项让托管 venv 里的本库直接找到同一个 venv 的 Beancount 命令，不需要再配置 `beanCheck`。
 
-DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安装/修复）；核心库本身不关心安装方式。发行版应把核心库作为依赖一并分发。
+前端可以为普通用户托管这个运行时（私有 venv + 一键安装/修复）；本库本身不关心安装方式，也不负责创建 venv。
 
 ## 写入门禁
 
@@ -113,7 +115,7 @@ DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安�
 ## 测试
 
 ```bash
-cd ledger-domain-core
+cd beancount-guard
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
@@ -129,15 +131,15 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 
 ## 已知限制
 
-- `init_ledger()` 仍是旧模板，只写空目录；新账本初始化由 DSH 插件复制 `ledger-domain-assets` 实现。
-- 导入已有账本（选择目录/校验/接管）还没有做；当前需要把插件 `root` 指向已有账本。
+- `init_ledger()` 使用内置模板生成新账本；模板仓库 `ledger-domain-assets` 由前端决定是否复制，本库不依赖它。
+- 导入已有账本（选择目录/校验/接管）还没有做；当前需要把前端 `root` 指向已有账本。
 - 交易/对账写 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
 - `bean-check` / `bean-query` 是外部程序；不导入 Beancount Python 包。
 - 账本文件只接受 UTF-8：读侧记为 `invalid_encoding` 问题，写入返回 `ledger_encoding_error`；GBK/ANSI 保存的文件需先另存为 UTF-8。
 - 账本绝对路径过长（Windows 260 字符上限）时，影子副本复制返回 `shadow_copy_failed` 并带出错路径；需要把账本移到更短的路径。
-- 托管引擎首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
+- 托管 venv 首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
 - 对账漂移当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
 
 ## CI
