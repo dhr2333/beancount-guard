@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+import ledger_domain
 from ledger_domain import LedgerError, create_ledger_domain
 from ledger_domain.bean import render_transaction
+from ledger_domain.validation import (
+    atomic_write,
+    mirror_tree,
+    remove_tree,
+    sweep_shadow_dirs,
+    write_lock,
+)
 
 NOW = datetime(2026, 11, 17, 4, 0, tzinfo=timezone.utc)  # 12:00 Asia/Shanghai
 TODAY = "2026-11-17"
@@ -676,6 +686,81 @@ class DomainTest(unittest.TestCase):
         with mock.patch("os.symlink", side_effect=denied):
             self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
 
+    def test_shadow_copy_drops_read_only_attribute(self) -> None:
+        source = self.fixture.root / "document"
+        source.mkdir()
+        read_only = source / "扫描件.txt"
+        read_only.write_text("x", encoding="utf-8")
+        os.chmod(read_only, 0o444)
+        self.addCleanup(remove_tree, source)
+        shadow = Path(tempfile.mkdtemp(prefix="ledger-domain-mirror-"))
+        self.addCleanup(remove_tree, shadow)
+        denied = OSError(1314, "客户端没有所需的特权")
+        with mock.patch("os.symlink", side_effect=denied):
+            mirror_tree(self.fixture.root, shadow, overrides={}, extra_files={}, excludes=set())
+        copied = shadow / "document/扫描件.txt"
+        self.assertTrue(copied.is_file())
+        self.assertTrue(os.stat(copied).st_mode & stat.S_IWUSR)
+
+    def test_remove_tree_deletes_read_only_tree(self) -> None:
+        parent = Path(tempfile.mkdtemp(prefix="ledger-domain-readonly-"))
+        tree = parent / "shadow"
+        (tree / "nested").mkdir(parents=True)
+        (tree / "nested/ro.txt").write_text("x", encoding="utf-8")
+        os.chmod(tree / "nested/ro.txt", 0o444)
+        remove_tree(tree)
+        self.assertFalse(tree.exists())
+        shutil.rmtree(parent, ignore_errors=True)
+
+    def test_cyclic_directory_link_does_not_recurse(self) -> None:
+        loop = self.fixture.root / "loop"
+        try:
+            loop.symlink_to(self.fixture.root, target_is_directory=True)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symbolic links are unavailable: {error}")
+        denied = OSError(1314, "客户端没有所需的特权")
+        with mock.patch("os.symlink", side_effect=denied):
+            self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_atomic_write_reports_read_only_target(self) -> None:
+        target = self.fixture.root / "trans/collect.bean"
+        before = target.read_text(encoding="utf-8")
+        with mock.patch("os.replace", side_effect=PermissionError(13, "拒绝访问")):
+            self.assert_code("ledger_not_writable", lambda: atomic_write(target, "; replaced\n"))
+        self.assertEqual(target.read_text(encoding="utf-8"), before)
+        self.assertEqual(list((self.fixture.root / "trans").glob(".collect.bean.*.tmp")), [])
+
+    def test_write_lock_times_out_when_stale_lock_cannot_be_removed(self) -> None:
+        lock = self.fixture.root / ".ledger/write.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("{}", encoding="utf-8")
+        os.utime(lock, (0, 0))
+
+        def acquire():
+            with write_lock(lock, timeout=0.2, stale=0):
+                pass
+
+        with mock.patch("pathlib.Path.unlink", side_effect=PermissionError(13, "拒绝访问")):
+            self.assert_code("lock_timeout", acquire)
+
+    def test_non_utf8_ledger_file_reports_encoding_error(self) -> None:
+        (self.fixture.root / "account/assets.bean").write_bytes("; 中文注释\n".encode("gbk"))
+        codes = {issue["code"] for issue in self.ledger.status()["issues"]}
+        self.assertIn("invalid_encoding", codes)
+        self.assert_code(
+            "ledger_encoding_error",
+            lambda: self.ledger.open_account(account="Assets:Bank:Encoded", currencies=["CNY"]),
+        )
+
+    def test_stale_shadow_dirs_are_swept(self) -> None:
+        stale = Path(tempfile.mkdtemp(prefix="dsh-ledger-validate-"))
+        fresh = Path(tempfile.mkdtemp(prefix="dsh-ledger-validate-"))
+        self.addCleanup(remove_tree, fresh)
+        os.utime(stale, (0, 0))
+        sweep_shadow_dirs()
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+
     def test_missing_reconciliation_target_is_refused(self) -> None:
         (self.fixture.root / "trans/reconciliation.bean").unlink()
         self.assert_code(
@@ -940,6 +1025,21 @@ class ReconciliationTest(unittest.TestCase):
         self.assertEqual(account["nextDue"], "2026-11-18")
         self.assertEqual(account["coveredThrough"], TODAY)
         self.assertTrue(self.ledger.validate()["ok"])
+
+
+class ContractTest(unittest.TestCase):
+    """A frontend pins against the version and the protocol, so they must not drift."""
+
+    def test_source_version_matches_pyproject(self) -> None:
+        project = Path(__file__).resolve().parents[1]
+        text = (project / "pyproject.toml").read_text(encoding="utf-8")
+        declared = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        self.assertIsNotNone(declared)
+        self.assertEqual(declared.group(1), ledger_domain.__version__)
+
+    def test_protocol_is_a_positive_integer(self) -> None:
+        self.assertIsInstance(ledger_domain.PROTOCOL, int)
+        self.assertGreaterEqual(ledger_domain.PROTOCOL, 1)
 
 
 if __name__ == "__main__":

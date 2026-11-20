@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import random
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .errors import LedgerError, fail
+from .ledger import read_ledger_text
 
 DEFAULT_EXCLUDES = {
     ".git",
@@ -35,6 +38,10 @@ DEFAULT_EXCLUDES = {
     "ledger-domain",
     "ledger_domain",
 }
+
+# Shadow trees this module leaves in the temp directory, and how old they are.
+SHADOW_PREFIXES = ("dsh-ledger-validate-", "ledger-domain-query-")
+SHADOW_MAX_AGE = 24 * 60 * 60
 
 
 def resolve_program(root: str | Path, configured: str | None, name: str) -> str:
@@ -75,15 +82,23 @@ def _program_suffix() -> str:
 
 
 def run_process(command: str, args: list[str], cwd: str | Path, timeout: float = 60.0) -> dict[str, Any]:
-    """Run one bounded child process and return its outcome without raising on exit codes."""
+    """Run one bounded child process and return its outcome without raising on exit codes.
+
+    Output is decoded as UTF-8 on every platform: the Windows ANSI code page
+    (cp936 on a Chinese system) cannot carry the ledger's narration text, and a
+    child would either fail to encode its diagnostic or hand back mojibake.
+    """
+    environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     try:
         completed = subprocess.run(
             [command, *args],
             cwd=str(cwd),
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
+            env=environment,
         )
         return {
             "code": completed.returncode,
@@ -122,7 +137,7 @@ def validate_ledger(
 ) -> dict[str, Any]:
     """Validate candidate content in a disposable shadow tree."""
     root_path = Path(root).resolve()
-    main_rel = os.path.relpath(Path(main_file).resolve(), root_path)
+    main_rel = Path(os.path.relpath(Path(main_file).resolve(), root_path)).as_posix()
     if main_rel.startswith(".."):
         fail("invalid_ledger_root", "the root bean file is outside the ledger root")
     overrides = dict(overrides or {})
@@ -130,13 +145,14 @@ def validate_ledger(
 
     if pending_directive and pending_directive.strip():
         pending_rel = "__ledger_domain_pending__.bean"
-        include_spec = os.path.relpath(pending_rel, os.path.dirname(main_rel) or ".")
+        include_spec = posixpath.relpath(pending_rel, posixpath.dirname(main_rel) or ".")
         base = overrides.get(main_rel)
         if base is None:
-            base = (root_path / main_rel).read_text(encoding="utf-8")
+            base = read_ledger_text(root_path / main_rel)
         overrides[main_rel] = f"{base if base.endswith(chr(10)) else base + chr(10)}include \"{include_spec}\"\n"
         extra_files[pending_rel] = pending_directive.strip() + "\n"
 
+    sweep_shadow_dirs()
     shadow = Path(tempfile.mkdtemp(prefix="dsh-ledger-validate-"))
     try:
         mirror_tree(
@@ -168,7 +184,56 @@ def validate_ledger(
             "diagnostic": "" if ok else format_diagnostic(outcome["stderr"], outcome["stdout"], outcome["timed_out"]),
         }
     finally:
-        shutil.rmtree(shadow, ignore_errors=True)
+        remove_tree(shadow)
+
+
+def sweep_shadow_dirs(max_age: float = SHADOW_MAX_AGE) -> None:
+    """Remove shadow trees an earlier run could not delete, e.g. a read-only one.
+
+    A shadow tree is created, used and deleted within one call, so anything
+    older than a day is a leftover rather than work in progress. Only the
+    prefixes this module creates are touched.
+    """
+    try:
+        with os.scandir(tempfile.gettempdir()) as iterator:
+            entries = list(iterator)
+    except OSError:
+        return
+    cutoff = time.time() - max_age
+    for entry in entries:
+        if not entry.name.startswith(SHADOW_PREFIXES):
+            continue
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        remove_tree(entry.path)
+
+
+def remove_tree(path: str | Path) -> None:
+    """Delete one directory tree this module created, best effort.
+
+    Windows refuses to delete files and directories that carry the read-only
+    attribute, and ``shutil.rmtree`` never clears it; without the retry a shadow
+    tree of a ledger that holds one read-only file would stay in the temp
+    directory forever, silently.
+    """
+    target = Path(path)
+
+    def force(func, item, _error) -> None:
+        try:
+            os.chmod(item, stat.S_IWRITE)
+            func(item)
+        except OSError:
+            pass
+
+    if not target.exists():
+        return
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(target, onexc=force)
+    else:
+        shutil.rmtree(target, onerror=force)
 
 
 def mirror_tree(
@@ -189,7 +254,7 @@ def mirror_tree(
             needed_dirs.add(parent)
             parent = os.path.dirname(parent)
 
-    def visit(real_dir: Path, shadow_dir: Path, prefix: str) -> None:
+    def visit(real_dir: Path, shadow_dir: Path, prefix: str, chain: frozenset[Path]) -> None:
         try:
             with os.scandir(real_dir) as iterator:
                 entries = list(iterator)
@@ -207,37 +272,96 @@ def mirror_tree(
             if rel in extra_files:
                 continue
             if entry.is_symlink():
-                _link_or_copy(real_path, target, directory=entry.is_dir())
+                _link_or_copy(real_path, target, directory=entry.is_dir(), chain=chain)
             elif entry.is_dir():
                 if rel in needed_dirs:
                     target.mkdir(parents=True, exist_ok=True)
-                    visit(real_path, target, rel)
+                    visit(real_path, target, rel, _extend(chain, real_path))
                 else:
-                    _link_or_copy(real_path, target, directory=True)
+                    _link_or_copy(real_path, target, directory=True, chain=chain)
             elif entry.is_file():
-                _link_or_copy(real_path, target)
+                _link_or_copy(real_path, target, chain=chain)
 
-    visit(root_path, shadow_path, "")
+    visit(root_path, shadow_path, "", _extend(frozenset(), root_path))
     for rel, content in [*overrides.items(), *extra_files.items()]:
         target = shadow_path / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
 
-def _link_or_copy(real_path: Path, target: Path, *, directory: bool = False) -> None:
+def _resolve(path: Path) -> Path | None:
+    """Resolve one path for cycle detection, or None when it cannot be read."""
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _extend(chain: frozenset[Path], path: Path) -> frozenset[Path]:
+    """Add one real directory to the chain of directories currently being mirrored."""
+    resolved = _resolve(path)
+    if resolved is None or resolved in chain:
+        return chain
+    return chain | {resolved}
+
+
+def _link_or_copy(
+    real_path: Path,
+    target: Path,
+    *,
+    directory: bool = False,
+    chain: frozenset[Path],
+) -> None:
     """Mirror one entry by symlink, falling back to a copy where links are forbidden.
 
     Windows rejects ``os.symlink`` without Developer Mode or the
     ``SeCreateSymbolicLinkPrivilege`` (``WinError 1314``); the shadow only needs
-    equivalent content, so a copy keeps validation working there.
+    equivalent content, so a copy keeps validation working there. The copy is
+    content-only, never ``copystat``: a read-only replica cannot be deleted
+    again on Windows. ``chain`` carries the real directories already on the
+    current path so a link pointing back at an ancestor terminates instead of
+    recursing until the path limit.
     """
     try:
         os.symlink(real_path, target, target_is_directory=directory)
     except OSError:
         if directory:
-            shutil.copytree(real_path, target, dirs_exist_ok=True, ignore_dangling_symlinks=True)
+            _copy_tree(real_path, target, chain=chain)
         else:
-            shutil.copy2(real_path, target)
+            _copy_file(real_path, target)
+
+
+def _copy_tree(real_dir: Path, target: Path, *, chain: frozenset[Path]) -> None:
+    """Copy one directory without metadata and without following a cycle."""
+    resolved = _resolve(real_dir)
+    if resolved is None or resolved in chain:
+        return
+    chain = chain | {resolved}
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        with os.scandir(real_dir) as iterator:
+            entries = list(iterator)
+    except OSError:
+        return
+    for entry in entries:
+        child = Path(entry.path)
+        child_target = target / entry.name
+        if entry.is_dir():
+            _copy_tree(child, child_target, chain=chain)
+        elif entry.is_file():
+            _copy_file(child, child_target)
+
+
+def _copy_file(real_path: Path, target: Path) -> None:
+    """Copy one file's content only, without attributes such as read-only."""
+    try:
+        shutil.copyfile(real_path, target)
+    except OSError as error:
+        fail(
+            "shadow_copy_failed",
+            f"无法把 {real_path.name} 复制到校验副本：{error}",
+            {"path": str(real_path)},
+        )
 
 
 def atomic_write(file: str | Path, content: str) -> None:
@@ -255,12 +379,24 @@ def atomic_write(file: str | Path, content: str) -> None:
         if path.exists():
             os.chmod(temporary, path.stat().st_mode & 0o777)
         os.replace(temporary, path)
+    except PermissionError as error:
+        _unlink_quiet(temporary)
+        fail(
+            "ledger_not_writable",
+            f"无法写入 {path.name}：{error.strerror or error}；请关闭占用该文件的程序，或取消它的只读属性",
+            {"file": str(path), "reason": error.strerror or str(error)},
+        )
     except Exception:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        _unlink_quiet(temporary)
         raise
+
+
+def _unlink_quiet(file: str | Path) -> None:
+    """Remove one path, ignoring a failure that no caller can act on."""
+    try:
+        os.unlink(file)
+    except OSError:
+        pass
 
 
 @contextmanager
@@ -284,10 +420,18 @@ def write_lock(lock_file: str | Path, timeout: float = 20.0, stale: float = 120.
                 continue
             if time.time() - current > stale:
                 try:
-                    path.unlink()
+                    os.chmod(path, stat.S_IWRITE)
                 except OSError:
                     pass
-                continue
+                try:
+                    path.unlink()
+                    continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # A stale lock that cannot be removed must not bypass the
+                    # timeout below, or this loop spins forever.
+                    pass
             if time.monotonic() - started > timeout:
                 fail("lock_timeout", "the ledger is being written by another operation; try again shortly", {"lockFile": str(path)})
             time.sleep(0.04 + random.random() * 0.08)

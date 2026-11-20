@@ -13,6 +13,7 @@ from typing import Any
 
 from .bean import split_document
 from .errors import fail
+from .ledger import read_ledger_text
 
 
 def resolve_monthly_target(root: str | Path, date: str) -> dict[str, Any]:
@@ -26,14 +27,14 @@ def resolve_monthly_target(root: str | Path, date: str) -> dict[str, Any]:
     index_rel = f"{year}/00.bean"
     index_file = root_path / index_rel
     try:
-        index_content = index_file.read_text(encoding="utf-8")
+        index_content = read_ledger_text(index_file)
     except FileNotFoundError:
         fail("year_not_managed", f"the ledger has no {index_rel}; create it before writing {date}", {"year": year, "date": date})
 
     rel_file = f"{year}/{month}.bean"
     file = root_path / rel_file
     try:
-        content = file.read_text(encoding="utf-8")
+        content = read_ledger_text(file)
         exists = True
     except FileNotFoundError:
         content = ""
@@ -112,7 +113,7 @@ def resolve_append_target(root: str | Path, kind: str) -> dict[str, Any]:
             f"the ledger has no {rel_file}; initialize it from ledger-domain-assets before writing",
             {"file": rel_file},
         )
-    content = path.read_text(encoding="utf-8")
+    content = read_ledger_text(path)
     # Keep the historical target shape used by callers. There is no year index
     # in the fixed-target layout; index_changed is always false.
     return {

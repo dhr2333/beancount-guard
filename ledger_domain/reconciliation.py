@@ -24,7 +24,7 @@ from .amounts import from_scaled, normalize_amount, parse_balance_failure, to_sc
 from .bean import append_block, is_account_name, is_currency, render_transaction
 from .dates import add_days, add_period, diff_days, is_date, is_period, iso, parse_date, today_in_zone
 from .errors import LedgerError, fail
-from .ledger import is_closed_on, project_name, resolve_name
+from .ledger import is_closed_on, project_name, read_ledger_text, resolve_name
 from .query import query_account_activity, query_account_balance
 from .target import resolve_append_target
 from .validation import atomic_write, validate_ledger, write_lock
@@ -306,7 +306,7 @@ class Reconciler:
             return {}
         target_file = self.domain.root / "trans" / "reconciliation.bean"
         try:
-            content = target_file.read_text(encoding="utf-8")
+            content = read_ledger_text(target_file)
         except OSError:
             fail("ledger_not_initialized", "the ledger has no trans/reconciliation.bean")
         block = record.get("directives")
@@ -959,7 +959,7 @@ class Reconciler:
             }
         target_file = self.domain.root / "trans" / "reconciliation.bean"
         try:
-            content = target_file.read_text(encoding="utf-8")
+            content = read_ledger_text(target_file)
         except OSError:
             return None
         old_block = record.get("directives")

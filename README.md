@@ -18,6 +18,21 @@ Beancount 账本的**核心库**。它不包含界面、不启动服务、不依
 | 账本源 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
 | DSH 插件 | `~/ledger-domain/dsh-ledger` | 只做展示页，通过 CLI 调本库，不含账本规则 |
 
+## 独立安装（不依赖任何前端）
+
+核心库发布在 PyPI，任何前端（Fava、Obsidian 插件、脚本、Agent）都可以直接使用：
+
+```bash
+pip install ledger-domain
+python -m ledger_domain --root /path/to/ledger status     # JSON CLI
+python -m ledger_domain --root /path/to/ledger health     # version + protocol
+python -m ledger_domain.mcp_server                        # 只读 MCP
+```
+
+- `ledger_domain.PROTOCOL` 是 CLI/MCP 契约版本：只有破坏性变更才 +1，前端据此判断兼容性。
+- `health` 返回 `{"version": "<安装版本>", "protocol": 1, ...}`；DSH 插件用它和 PyPI 上的最新版本比较，决定是否提示升级。
+- 前端不得依赖私有实现：只用 CLI JSON 信封、MCP 工具集和这两个字段。
+
 ## 函数接口
 
 ```python
@@ -89,10 +104,11 @@ DSH 插件可以为普通用户托管这个运行时（私有 venv + 一键安�
 
 ## 写入门禁
 
-1. 候选内容写入影子树（未改动文件用 symlink，改动文件写真实副本；Windows 无 symlink 权限时自动退化为复制）。
+1. 候选内容写入影子树（未改动文件用 symlink，改动文件写真实副本；Windows 无 symlink 权限时退化为复制，只复制内容、不继承只读等属性，回指祖先的目录链接跳过以免无限递归）。
 2. 在影子树运行真实的 `bean-check`。
-3. 通过后，在 `.ledger/write.lock` 锁内 `os.replace` 原子替换目标文件。
+3. 通过后，在 `.ledger/write.lock` 锁内 `os.replace` 原子替换目标文件；目标只读或被占用时返回 `ledger_not_writable`，不擅自改文件属性。
 4. 失败时返回 `bean_check_failed` / `balance_mismatch`，原文件零改动。
+5. 影子目录用完即删；上次残留（超过一天）会在下一次校验前自动清掉。
 
 ## 测试
 
@@ -119,6 +135,8 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 - 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
 - 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
 - `bean-check` / `bean-query` 是外部程序；不导入 Beancount Python 包。
+- 账本文件只接受 UTF-8：读侧记为 `invalid_encoding` 问题，写入返回 `ledger_encoding_error`；GBK/ANSI 保存的文件需先另存为 UTF-8。
+- 账本绝对路径过长（Windows 260 字符上限）时，影子副本复制返回 `shadow_copy_failed` 并带出错路径；需要把账本移到更短的路径。
 - 托管引擎首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
 - 对账漂移当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
 

@@ -46,6 +46,23 @@ pipeline {
                 '''
             }
         }
+        stage('Package') {
+            steps {
+                sh '''
+                    set -eu
+                    tar --exclude=.git --exclude=.venv --exclude='__pycache__' --exclude=dist -cf - . \
+                      | docker run --rm -i python:3.12-slim bash -lc '
+                          set -eux
+                          mkdir -p /workspace
+                          tar -xf - -C /workspace
+                          cd /workspace
+                          python -m pip install --disable-pip-version-check build twine
+                          python -m build
+                          python -m twine check dist/*
+                        '
+                '''
+            }
+        }
     }
 
     post {

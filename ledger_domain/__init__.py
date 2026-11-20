@@ -14,5 +14,7 @@ from __future__ import annotations
 from .core import LedgerDomain, create_ledger_domain
 from .errors import LedgerError, fail
 
-__all__ = ["LedgerDomain", "create_ledger_domain", "LedgerError", "fail"]
+__all__ = ["LedgerDomain", "create_ledger_domain", "LedgerError", "fail", "PROTOCOL"]
 __version__ = "0.1.0"
+# The CLI/MCP contract version; bump it only when a frontend must change.
+PROTOCOL = 1

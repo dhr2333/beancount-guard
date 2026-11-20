@@ -15,8 +15,10 @@ import argparse
 import json
 import os
 import sys
+from importlib import metadata
 from typing import Any
 
+from . import PROTOCOL, __version__
 from .core import LedgerDomain, create_ledger_domain
 from .errors import LedgerError, fail
 
@@ -32,6 +34,18 @@ def _read_payload() -> dict[str, Any]:
     if not isinstance(payload, dict):
         fail("invalid_argument", "stdin payload must be a JSON object")
     return payload
+
+
+def _core_version() -> str:
+    """Report the installed distribution version, falling back to the source literal.
+
+    A frontend compares this against PyPI to offer an upgrade, so it must be the
+    version of the files actually imported, not a hand-copied string.
+    """
+    try:
+        return metadata.version("ledger-domain")
+    except metadata.PackageNotFoundError:
+        return __version__
 
 
 def _emit(value: Any) -> None:
@@ -143,7 +157,13 @@ def _domain(args: argparse.Namespace) -> LedgerDomain:
 def _dispatch(args: argparse.Namespace, domain: LedgerDomain) -> Any:
     command = args.command
     if command == "health":
-        return {"root": str(domain.root), "beanFile": domain.bean_file, "today": domain.today_text()}
+        return {
+            "root": str(domain.root),
+            "beanFile": domain.bean_file,
+            "today": domain.today_text(),
+            "version": _core_version(),
+            "protocol": PROTOCOL,
+        }
     if command == "setup":
         return domain.setup()
     if command == "init":

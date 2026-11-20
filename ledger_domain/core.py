@@ -44,6 +44,7 @@ from .ledger import (
     list_account_states,
     project_name,
     project_text,
+    read_ledger_text,
     resolve_name,
 )
 from .query import query_balances as query_balances_impl
@@ -223,7 +224,7 @@ class LedgerDomain:
     def _read_title(main: Path) -> str | None:
         try:
             content = main.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
         match = re.search(r'option[ \t]+"title"[ \t]+"((?:[^"\\]|\\.)*)"', content)
         return match.group(1) if match else None
@@ -411,7 +412,7 @@ class LedgerDomain:
                         {"alias": values["alias"], "accounts": [canonical_collision]},
                     )
 
-            content = Path(opened["file"]).read_text(encoding="utf-8")
+            content = read_ledger_text(opened["file"])
             rewritten, changed = rewrite_open_metadata(content, canonical, values)
             if not changed:
                 return self.account(canonical) or {}
@@ -509,7 +510,7 @@ class LedgerDomain:
                 if collision is not None:
                     fail("alias_conflict", f'alias "{alias_text}" collides with the canonical account {collision}', {"alias": alias_text, "accounts": [collision]})
 
-            content = path.read_text(encoding="utf-8")
+            content = read_ledger_text(path)
             block = render_open(
                 {
                     "date": open_date,
@@ -598,7 +599,7 @@ class LedgerDomain:
                 rel_file = opened["rel_file"]
                 current_content = rewrites.get(rel_file)
                 if current_content is None:
-                    current_content = Path(opened["file"]).read_text(encoding="utf-8")
+                    current_content = read_ledger_text(opened["file"])
                 rewritten, _ = rewrite_open_date(current_content, canonical, date_text)
                 rewrites[rel_file] = rewritten
                 changed.append({"account": canonical, "from": current, "to": date_text, "file": rel_file})

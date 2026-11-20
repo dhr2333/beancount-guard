@@ -14,7 +14,7 @@ from .amounts import from_scaled, normalize_amount, to_scaled
 from .dates import is_date
 from .errors import fail
 from .ledger import project_name, resolve_name
-from .validation import DEFAULT_EXCLUDES, mirror_tree, run_process
+from .validation import DEFAULT_EXCLUDES, mirror_tree, remove_tree, run_process, sweep_shadow_dirs
 
 POSITION_RE = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s+([A-Z][A-Z0-9'._-]*)(.*)$")
 
@@ -188,7 +188,6 @@ def query_account_balance(
     if not is_date(as_of):
         fail("invalid_date", "asOf must be a YYYY-MM-DD date")
     import os
-    import shutil
     import tempfile
     from pathlib import Path as _Path
 
@@ -200,6 +199,7 @@ def query_account_balance(
     )
     shadow = None
     if overrides:
+        sweep_shadow_dirs()
         shadow = tempfile.mkdtemp(prefix="ledger-domain-query-")
         try:
             mirror_tree(
@@ -217,7 +217,7 @@ def query_account_balance(
                 timeout=timeout,
             )
         finally:
-            shutil.rmtree(shadow, ignore_errors=True)
+            remove_tree(shadow)
     else:
         rows = _run_query(
             root=str(root_path),

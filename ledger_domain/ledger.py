@@ -39,6 +39,24 @@ def resolve_include(including_file: str, spec: str) -> str:
     return os.path.normpath(os.path.join(os.path.dirname(including_file), expanded))
 
 
+def read_ledger_text(file: str | Path) -> str:
+    """Read one ledger file that is about to be rewritten.
+
+    A ledger file saved by a Windows editor in the ANSI code page is not
+    UTF-8; the rewrite must stop with a stable code instead of letting
+    ``UnicodeDecodeError`` escape as an internal failure.
+    """
+    path = Path(file)
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        fail(
+            "ledger_encoding_error",
+            f"{path.name} 不是 UTF-8 编码（{error.reason}）；请用 UTF-8 重新保存后再写入",
+            {"file": str(path), "encoding": error.encoding, "offset": error.start},
+        )
+
+
 class LedgerReader:
     """Cached include-closure reader."""
 
@@ -96,6 +114,15 @@ class LedgerReader:
             seen.add(file)
             try:
                 content = Path(file).read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                issues.append(
+                    {
+                        "code": "invalid_encoding",
+                        "message": f"{self.rel_file(file)} 不是 UTF-8 编码；请用 UTF-8 重新保存",
+                        "file": self.rel_file(file),
+                    }
+                )
+                continue
             except OSError as error:
                 issues.append(
                     {

@@ -18,7 +18,7 @@
 2. 把工作区 tar 流送进 Python 3.12 容器；
 3. 安装 `beancount==3.2.3` 与 `beanquery==0.2.0`；
 4. `python -m compileall -q ledger_domain`；
-5. `python -m unittest discover -s tests -v`（20 项，全部在临时账本副本上运行）；
+5. `python -m unittest discover -s tests -v`（全部在临时账本副本上运行）；
 6. `python -m ledger_domain --root /workspace health` 冒烟。
 
 不访问真实账本，不写用户目录，构建产物只有日志。

@@ -79,6 +79,8 @@ class CliTest(unittest.TestCase):
         # 今天必须是真实的上海日期，而不是某个写死的日子（否则隔天就会假红）。
         expected_today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         self.assertEqual(health["value"]["today"], expected_today)
+        self.assertEqual(health["value"]["protocol"], 1)
+        self.assertRegex(health["value"]["version"], r"^\d+\.\d+\.\d+")
         bootstrap = self.run_cli("bootstrap")
         self.assertTrue(bootstrap["ok"])
         self.assertEqual(len(bootstrap["value"]["accounts"]), 2)
