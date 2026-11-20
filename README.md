@@ -1,147 +1,221 @@
 # beancount-guard
 
-Beancount 账本的**写入守卫与对账内核**：校验后原子写入、别名/周期治理、对账闭环、只读 BQL/MCP。不绑定任何 UI——不包含界面、不启动服务、不依赖特定前端；任何前端（Fava、Obsidian 插件、脚本、Agent）都调用同一组 Python 函数，或通过同一份 JSON CLI 契约调用。
+**The write boundary between AI agents and your plain-text Beancount ledger.**
 
-## 写入目标
+Agents propose. You approve. `bean-check` decides.
 
-- 交易：`trans/collect.bean`
-- 对账：`trans/reconciliation.bean`
-- `trans/main.bean` 只 include 上述两个文件，不写交易。
-- 不再按 `YYYY/MM.bean` 分月写入。
-- 本库负责整个账本写入；新账本从模板仓库开始。
+[![PyPI](https://img.shields.io/pypi/v/beancount-guard.svg)](https://pypi.org/project/beancount-guard/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://pypi.org/project/beancount-guard/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Protocol](https://img.shields.io/badge/protocol-1-blueviolet.svg)](docs/POSITIONING.md)
 
-## 与其他项目的关系
+[中文说明](README.zh-CN.md) · [Positioning](docs/POSITIONING.md)
 
-| 项目 | 根目录 | 职责 |
-|---|---|---|
-| 写入守卫（本仓库） | `~/ledger-domain/beancount-guard` | 别名/周期治理、对账重建、草稿队列、校验后原子写入、查询投影 |
-| 账本模板 | `~/ledger-domain/ledger-domain-assets` | 只存 `.bean` 和账本资源，不放代码 |
-| DSH 面板 | `~/ledger-domain/dsh-ledger` | 可选前端之一，只做展示，通过 CLI 调本库 |
+## The problem
 
-前端可替换：本库不认识 DSH，只提供 CLI JSON 信封与 MCP 工具集。
+An agent can draft a transaction in milliseconds. A plain-text ledger has no transaction boundary: a partial write, a broken `include`, or an unvalidated bulk import can leave the only source of truth in a state no one can trust.
 
-## 独立安装（不依赖任何前端）
+The scarce resource is not generation. It is a write you can trust.
 
-发布在 PyPI，任何前端都可以直接使用：
+`beancount-guard` is the layer that makes agent writes trustworthy. It is not another ledger app. It is a small, local, UI-agnostic kernel that any frontend, script, or agent can call.
+
+## What this is / is not
+
+| It is | It is not |
+|---|---|
+| A write kernel for Beancount ledgers | A ledger app or web UI |
+| A review queue for agent proposals | A hosted service or SaaS |
+| A real `bean-check` gate plus atomic commit | A model or a transaction classifier |
+| A Python library, JSON CLI, and read-only MCP | An MCP write server |
+| Local-first, plain text stays yours | A replacement for Beancount or Fava |
+
+## How a write happens
+
+1. **Propose.** An agent submits a structured transaction draft, or a structure operation such as account open, redate, metadata, or balance. Nothing is written to the ledger.
+2. **Validate.** The candidate content is mirrored into a disposable shadow tree and checked by the real `bean-check`.
+3. **Approve.** A human approves the proposal. The click is the confirmation.
+4. **Commit.** The target file is replaced atomically under a write lock, and the decision is appended to the audit log.
+
+If validation fails, the original ledger is unchanged. If the process crashes mid-write, the next approval can recover from the `draft_id` already present in the ledger.
+
+## Why not just let an agent edit the file?
+
+- Query-only MCP servers can read a ledger but cannot write it.
+- Direct-write tools trust the model with live balances.
+- Hosted services take custody of the ledger.
+- `beancount-guard` turns every write into a reviewed proposal, validates it with the same `bean-check` you already trust, and commits it atomically.
+
+See [docs/POSITIONING.md](docs/POSITIONING.md) for the full comparison and the project's place in the ecosystem.
+
+## What's inside
+
+- **Reviewed transaction drafts.** Submitting a draft never touches the ledger. Approval renders the transaction and appends it.
+- **Structure operation queue.** `account-open`, `account-redate`, `account-metadata`, and `balance` wait for approval when an agent proposes them.
+- **One write gate.** Shadow-tree validation, a process-level lock, and atomic replace for every ledger mutation.
+- **Ledger semantics, not just syntax.** Alias resolution, reconciliation periods, due/overdue rebuilds, reconciliation preview/commit, same-`asOf` updates, history, and auto-pad for late drafts.
+- **Frontend-neutral contracts.** A stable JSON CLI envelope, a Python API, and a read-only MCP surface with a protocol version.
+- **Local-first.** Standard library only. The ledger remains plain text in a directory you own.
+
+## Install
+
+Published on PyPI. No frontend is required:
 
 ```bash
 pip install beancount-guard
 python -m beancount_guard --root /path/to/ledger status     # JSON CLI
 python -m beancount_guard --root /path/to/ledger health     # version + protocol
-python -m beancount_guard.mcp_server                        # 只读 MCP
+python -m beancount_guard.mcp_server --root /path/to/ledger # read-only MCP
 ```
 
-- `beancount_guard.PROTOCOL` 是 CLI/MCP 契约版本：只有破坏性变更才 +1，前端据此判断兼容性。
-- `health` 返回 `{"version": "<安装版本>", "protocol": 1, ...}`；前端用它和 PyPI 上的最新版本比较，决定是否提示升级。
-- 前端不得依赖私有实现：只用 CLI JSON 信封、MCP 工具集和这两个字段。
+For the MCP server, install the optional extra:
 
-## 函数接口
+```bash
+pip install "beancount-guard[mcp]"
+```
+
+A new ledger can be created from the built-in template:
+
+```bash
+python -m beancount_guard --root /path/to/new-ledger init
+python -m beancount_guard --root /path/to/new-ledger bootstrap
+```
+
+## Python API
 
 ```python
 from beancount_guard import create_beancount_guard
 
-ledger = create_beancount_guard(root="/home/dhr2333/Documents/账本-mvp")
+ledger = create_beancount_guard(root="/path/to/ledger")
 
-ledger.setup()                                    # 是否已有 main.bean
-ledger.init_ledger(title="我的账本", currency="CNY")  # 生成新账本并 bean-check
-ledger.resolve_alias("工行5244")                 # → {"account": "Assets:...", "matched": "alias"}
+ledger.setup()                                    # whether main.bean already exists
+ledger.init_ledger(title="My ledger", currency="CNY")  # create and bean-check a new ledger
+ledger.resolve_alias("bank-5244")                 # -> {"account": "Assets:...", "matched": "alias"}
 ledger.list_accounts()
 ledger.get_due_reconciliations()
-ledger.set_account_metadata(account="Assets:...", alias="工行5244", reconcile="monthly")
-ledger.preview_reconciliation({"account": "工行5244", "asOf": "2026-11-30", "actual": "1000.00"})
+ledger.set_account_metadata(account="Assets:...", alias="bank-5244", reconcile="monthly")
+ledger.preview_reconciliation({"account": "bank-5244", "asOf": "2026-11-30", "actual": "1000.00"})
 ledger.commit_reconciliation({...preview fields...})       # create / same-asOf update
-ledger.reconcile_history(account="工行5244")
-ledger.open_account(account="Assets:Savings:Bank:BOC0814", currencies=["CNY"], alias="中国银行 0814", reconcile="monthly")
-ledger.update_draft(draft_id="draft-...", payload={"payee": "星巴克"})
-ledger.submit_draft({...})                        # 入队，不写账本
-ledger.approve_draft(draft_id="draft-...")        # 校验 → 原子追加
+ledger.reconcile_history(account="bank-5244")
+ledger.open_account(account="Assets:Savings:Bank:BOC0814", currencies=["CNY"], alias="BOC 0814", reconcile="monthly")
+ledger.update_draft(draft_id="draft-...", payload={"payee": "Starbucks"})
+ledger.submit_draft({...})                        # enqueue, do not write
+ledger.approve_draft(draft_id="draft-...")        # validate -> atomic append
 ledger.query_transactions(date_from="2026-10-01", date_to="2026-10-31")
 ledger.query_balances(as_of="2026-11-17")
 ```
 
-### 待办队列：人 vs Agent
+`LedgerError` carries a stable `code`, a `message`, and `details`. Adapters display localized text for the code; they never parse human text to recover meaning.
 
-人在界面上点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。Agent 发起的写入一律入队等人批准：交易进草稿队列（`submit-draft`），结构变更进操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` / `account-metadata` / `balance`）。批准结构变更时本库会自动重算待审草稿的账户解析，让原本卡在 `unresolved_account` 的草稿立刻可批。
+## Pending queues: human vs agent
 
-`LedgerError` 带 `code`、`message`、`details`；UI/CLI 直接展示 code 对应的本地化文案。
+Operations a human clicks in a UI (opening an account, changing an alias or period, reconciling) are already confirmed, so they execute directly. Writes initiated by an agent always enter a queue and wait for human approval:
 
-## 数据放在哪
+- Transactions enter the draft queue (`submit-draft`).
+- Structure changes enter the operation queue (`submit-operation`, with kind `account-open` / `account-redate` / `account-metadata` / `balance`).
 
-- 别名、对账周期：账本 `open` 指令的 metadata。
-- 对账到期日：每次从最近 `balance` 断言和周期重建，不落库。
-- 草稿、锁、审计：账本根目录的 `.ledger/`（运行态，已在账本源 `.gitignore`）。
-- 正式交易：审核批准后追加到 `trans/collect.bean`；对账追加/替换 `trans/reconciliation.bean`。
+Approving a structure operation automatically re-resolves pending drafts against the updated account set, so drafts previously blocked on `unresolved_account` can become approvable immediately.
 
-## CLI 契约
+## Data layout
 
-任何语言都可以通过子进程调用：
+- Transactions: `trans/collect.bean`
+- Reconciliation: `trans/reconciliation.bean`
+- `trans/main.bean` only includes those two files and never holds transactions.
+- Aliases and reconciliation periods: metadata on the ledger's `open` directives.
+- Reconciliation due dates: rebuilt from the most recent `balance` assertion and the period; never stored as a second ledger.
+- Drafts, locks, and audit: `.ledger/` under the ledger root (runtime state, already ignored by the ledger's `.gitignore`).
+- Approved transactions: appended to `trans/collect.bean`; reconciliation directives are appended to or replace the latest block in `trans/reconciliation.bean`.
+
+## CLI contract
+
+Any language can call the CLI as a subprocess:
 
 ```bash
 python -m beancount_guard --root /path/to/ledger setup
 python -m beancount_guard --root /path/to/ledger bootstrap
 python -m beancount_guard --root /path/to/ledger balance <<'JSON'
-{"account": "工行5244", "amount": "-30.00", "currency": "CNY"}
+{"account": "bank-5244", "amount": "-30.00", "currency": "CNY"}
 JSON
 ```
 
-stdout 固定为：
+stdout is always one of:
 
 ```json
 {"ok": true, "value": {...}}
 {"ok": false, "error": {"code": "...", "message": "...", "details": {}}}
 ```
 
-业务失败也返回退出码 0；用法/内部错误返回 1。命令：`health`、`setup`、`init`、`bootstrap`、`status`、`accounts`、`resolve`、`due`、`metadata`、`account-open`、`account-redate`、`balance`、`reconcile-preview`、`reconcile-commit`、`reconcile-history`、`refresh-drafts`、`approve-all-drafts`、`op-submit`、`op-list`、`op-get`、`op-approve`、`op-approve-all`、`op-reject`、`list-drafts`、`get-draft`、`submit-draft`、`update-draft`、`approve-draft`、`reject-draft`、`quick-draft`、`query-transactions`、`query-balances`、`validate`、`audit-metadata`。
+Business failures still exit `0`; usage or internal errors exit `1`. Commands: `health`, `setup`, `init`, `bootstrap`, `status`, `accounts`, `resolve`, `due`, `metadata`, `account-open`, `account-redate`, `balance`, `reconcile-preview`, `reconcile-commit`, `reconcile-history`, `refresh-drafts`, `approve-all-drafts`, `op-submit`, `op-list`, `op-get`, `op-approve`, `op-approve-all`, `op-reject`, `list-drafts`, `get-draft`, `submit-draft`, `update-draft`, `approve-draft`, `reject-draft`, `quick-draft`, `query-transactions`, `query-balances`, `validate`, `audit-metadata`.
 
-## 运行时
+## Runtime
 
-本库只依赖标准库；校验和查询调用外部程序：
+The package depends only on the standard library. Validation and querying call external programs:
 
-- `bean-check` 来自 `beancount`
-- `bean-query` 来自 `beanquery`
+- `bean-check` from Beancount
+- `bean-query` from beanquery
 
-查找顺序：显式配置路径 → 账本 `.venv/bin` → **当前解释器同目录** → PATH。最后一项让托管 venv 里的本库直接找到同一个 venv 的 Beancount 命令，不需要再配置 `beanCheck`。
+Lookup order: an explicit configured path, the ledger's `.venv/bin`, the directory of the running interpreter, then `PATH`. The interpreter-sibling fallback lets a managed virtualenv find its own Beancount commands without extra configuration.
 
-前端可以为普通用户托管这个运行时（私有 venv + 一键安装/修复）；本库本身不关心安装方式，也不负责创建 venv。
+A frontend may manage this runtime for end users (a private venv plus install/repair). The core does not create a venv or care how it was installed.
 
-## 写入门禁
+## Write gate
 
-1. 候选内容写入影子树（未改动文件用 symlink，改动文件写真实副本；Windows 无 symlink 权限时退化为复制，只复制内容、不继承只读等属性，回指祖先的目录链接跳过以免无限递归）。
-2. 在影子树运行真实的 `bean-check`。
-3. 通过后，在 `.ledger/write.lock` 锁内 `os.replace` 原子替换目标文件；目标只读或被占用时返回 `ledger_not_writable`，不擅自改文件属性。
-4. 失败时返回 `bean_check_failed` / `balance_mismatch`，原文件零改动。
-5. 影子目录用完即删；上次残留（超过一天）会在下一次校验前自动清掉。
+1. Candidate content is written into a shadow tree (unchanged files are symlinked; changed files are real copies; Windows without symlink permission falls back to content-only copies).
+2. The real `bean-check` runs against the shadow tree.
+3. On success, the target file is replaced atomically with `os.replace` inside `.ledger/write.lock`. A read-only or occupied target returns `ledger_not_writable`; file attributes are never silently changed.
+4. On failure, the call returns `bean_check_failed` or `balance_mismatch`, and the original file is untouched.
+5. The shadow directory is deleted after use; leftovers older than one day are swept before the next validation.
 
-## 测试
+## Reconciliation loop
+
+- Due: with a balance, `nextDue = add_period(balance.date) - 1 day`; without one, the account is immediately due and `unreconciled = true`.
+- Preview/commit: `reconcile-preview` returns expected / difference / allocations / directives / hashes; `reconcile-commit` writes `transaction* + pad? + balance` atomically through the same write gate.
+- Update: committing again for the same `asOf` uses `mode=update`, replaces the latest block, and marks the old history `superseded`; earlier periods cannot be changed.
+- Late entries: drafts dated `<= asOf` are still allowed after reconciliation. A `pad` absorbs them when present; otherwise `approve-draft` inserts a pad into the latest block. If that fails, the call returns `reconcile_update_required`.
+- History: `.ledger/reconciliations/<id>.json` records expected/actual/allocations/pad/balance/directives/hash/file line, so a reconciliation can be replayed and audited.
+
+## Contract and versioning
+
+- `beancount_guard.PROTOCOL` is the CLI/MCP contract version. It increments only on a breaking change; frontends use it to decide compatibility.
+- `health` returns `{"version": "<installed version>", "protocol": 1, ...}`; a frontend can compare the version with the latest on PyPI and offer an upgrade.
+- Frontends must not depend on private implementation details: only the CLI JSON envelope, the MCP tool set, and these two fields.
+
+## Ecosystem fit
+
+`beancount-guard` is designed to sit *between* tools, not to replace them:
+
+- **With query MCP servers** (`beanquery-mcp`, `beanie-mcp`): they read and answer questions; this project guards the writes.
+- **With Fava or an Obsidian plugin**: they remain the view; this project is the write boundary behind them.
+- **With a custom agent or script**: call the Python API or the JSON CLI; the same guard works regardless of the agent framework.
+
+The MCP surface is deliberately read-only. Write proposals use the stable JSON CLI or Python API, so a model is never handed direct write access to the ledger. See [docs/POSITIONING.md](docs/POSITIONING.md) for the reasoning and the competitive landscape.
+
+## Status and limits
+
+- `init_ledger()` generates a new ledger from the built-in template. The external `ledger-domain-assets` repository is optional and not required by this library.
+- Importing an existing ledger (directory picker, validation, takeover) is not implemented; point `root` at an existing ledger instead.
+- Transactions and reconciliation write `trans/collect.bean` and `trans/reconciliation.bean`; create appends, update replaces the latest block in place. A missing file returns `ledger_not_initialized`.
+- Drafts support only `*` / `!`. Every posting must carry an explicit amount. Costs, prices, and automatic balancing are not supported.
+- Accounts created implicitly by `auto_accounts`, with no `open` directive, can be queried, reconciled, and used in drafts, but cannot carry aliases or periods.
+- `bean-check` / `bean-query` are external programs; the Beancount Python package is never imported.
+- Ledger files must be UTF-8. The read side reports `invalid_encoding`; writes return `ledger_encoding_error`. GBK/ANSI files must be saved as UTF-8 first.
+- On Windows, an overly long absolute path (260-character limit) makes the shadow copy fail with `shadow_copy_failed` and the offending path; move the ledger to a shorter path.
+- Initial installation of a managed venv needs package-index access for `beancount` and `beanquery`; afterwards it can work offline.
+- Reconciliation drift is not proactively alerted; `validate` / `reconcile-preview` do not return `reconciliation_drift`.
+- This library guarantees structure, atomicity, and auditability. It does not judge whether an agent picked the right category for a transaction.
+
+## Development
 
 ```bash
 cd beancount-guard
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-测试在临时账本副本上覆盖：别名冲突、对账重建、余额不一致零写入、草稿流转、并发写、崩溃恢复、查询投影。
-
-## 对账闭环
-
-- 到期：有 balance 时 `nextDue = add_period(balance.date) - 1 天`；没有 balance 时立即进待办，`unreconciled = true`。
-- 预览/提交：`reconcile-preview` 返回 expected / difference / allocations / directives / hashes；`reconcile-commit` 在同一写门禁里原子写 `transaction* + pad? + balance`。
-- 更新：同一 `asOf` 再次提交走 `mode=update`，替换最近一次 block，旧历史 `superseded`；更早期间不可改。
-- 补记：对账后仍允许日期 ≤ asOf 的草稿。有 pad 时被吸收；没有 pad 时 `approve-draft` 自动往最近一次 block 插入 pad；自动补 pad 失败才返回 `reconcile_update_required`。
-- 历史：`.ledger/reconciliations/<id>.json`，记录 expected/actual/allocations/pad/balance/directives/hash/文件行，可回放、可审计。
-
-## 已知限制
-
-- `init_ledger()` 使用内置模板生成新账本；模板仓库 `ledger-domain-assets` 由前端决定是否复制，本库不依赖它。
-- 导入已有账本（选择目录/校验/接管）还没有做；当前需要把前端 `root` 指向已有账本。
-- 交易/对账写 `trans/collect.bean` / `trans/reconciliation.bean`；create 追加，update 原位替换最近一次 block；文件不存在时报 `ledger_not_initialized`。
-- 草稿只支持 `*` / `!`；每个 posting 必须显式给金额；不支持成本/价格/自动平衡。
-- 由 `auto_accounts` 隐式创建、没有 `open` 指令的账户可查询/对账/进草稿，但不能维护别名与周期。
-- `bean-check` / `bean-query` 是外部程序；不导入 Beancount Python 包。
-- 账本文件只接受 UTF-8：读侧记为 `invalid_encoding` 问题，写入返回 `ledger_encoding_error`；GBK/ANSI 保存的文件需先另存为 UTF-8。
-- 账本绝对路径过长（Windows 260 字符上限）时，影子副本复制返回 `shadow_copy_failed` 并带出错路径；需要把账本移到更短的路径。
-- 托管 venv 首次安装需要从包索引安装 `beancount` 与 `beanquery`；装好后可离线。
-- 对账漂移当前不主动告警；`validate` / `reconcile-preview` 不返回 `reconciliation_drift`。
+Tests run on temporary ledger copies and cover alias conflicts, reconciliation rebuilds, zero writes on balance mismatch, draft transitions, concurrent writes, crash recovery, and query projection.
 
 ## CI
 
-Jenkins Multibranch Pipeline，配置与本地等价命令见 [docs/CI.md](docs/CI.md)。
+Jenkins Multibranch Pipeline. The configuration and local equivalent commands are in [docs/CI.md](docs/CI.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

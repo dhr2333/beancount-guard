@@ -5,16 +5,36 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "beancount-guard"
 version = "0.1.0"
-description = "Write guard and reconciliation core for Beancount ledgers: alias metadata, periods, reviewed drafts, validated atomic writes"
+description = "Agent-era write guard for Beancount ledgers: reviewed drafts, real bean-check validation, atomic writes, reconciliation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+keywords = [
+    "beancount",
+    "plain-text-accounting",
+    "plaintext-accounting",
+    "ledger",
+    "accounting",
+    "ai-agents",
+    "human-in-the-loop",
+    "mcp",
+    "reconciliation",
+]
 dependencies = []
 classifiers = [
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Office/Business :: Financial :: Accounting",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dhr2333/beancount-guard"
+Repository = "https://github.com/dhr2333/beancount-guard"
+Issues = "https://github.com/dhr2333/beancount-guard/issues"
+PyPI = "https://pypi.org/project/beancount-guard/"
 
 [project.optional-dependencies]
 mcp = ["mcp>=2.3", "beanquery>=0.2"]
