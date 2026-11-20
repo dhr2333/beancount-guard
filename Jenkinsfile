@@ -15,6 +15,7 @@ pipeline {
     environment {
         PYTHONUNBUFFERED = '1'
         PIP_DISABLE_PIP_VERSION_CHECK = '1'
+        PIP_DEFAULT_TIMEOUT = '120'
     }
 
     stages {
@@ -37,7 +38,7 @@ pipeline {
                           mkdir -p /workspace
                           tar -xf - -C /workspace
                           cd /workspace
-                          python -m pip install --disable-pip-version-check \
+                          python -m pip install --disable-pip-version-check --retries 10 --timeout 120 \
                             "beancount==3.2.3" "beanquery==0.2.0"
                           python -m compileall -q beancount_guard
                           PYTHONPATH=/workspace python -m unittest discover -s tests -v
@@ -56,7 +57,7 @@ pipeline {
                           mkdir -p /workspace
                           tar -xf - -C /workspace
                           cd /workspace
-                          python -m pip install --disable-pip-version-check build twine
+                          python -m pip install --disable-pip-version-check --retries 10 --timeout 120 build twine
                           python -m build
                           python -m twine check dist/*
                         '
