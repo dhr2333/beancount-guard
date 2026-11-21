@@ -34,7 +34,7 @@ PYTHONPATH=. python -m beancount_guard --root . health
 
 ## 凭据
 
-GitHub Branch Source 使用 Jenkins 已有的 GitHub 凭据（与 `LedgerKernel` 相同）；仓库本身不保存任何 token。若仓库改为私有，需确认该凭据具备读取私有仓库的 `repo` 权限。
+GitHub Branch Source 使用 Jenkins 已有的 GitHub 凭据；仓库本身不保存任何 token。若仓库改为私有，需确认该凭据具备读取私有仓库的 `repo` 权限。
 
 ## 分支保护（可选）
 

@@ -6,10 +6,10 @@ Agents propose. You approve. `bean-check` decides.
 
 [![PyPI](https://img.shields.io/pypi/v/beancount-guard.svg)](https://pypi.org/project/beancount-guard/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://pypi.org/project/beancount-guard/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Protocol](https://img.shields.io/badge/protocol-1-blueviolet.svg)](docs/POSITIONING.md)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/dhr2333/beancount-guard/blob/main/LICENSE)
+[![Protocol](https://img.shields.io/badge/protocol-1-blueviolet.svg)](https://github.com/dhr2333/beancount-guard/blob/main/docs/POSITIONING.md)
 
-[中文说明](README.zh-CN.md) · [Positioning](docs/POSITIONING.md)
+[中文说明](https://github.com/dhr2333/beancount-guard/blob/main/README.zh-CN.md) · [Positioning](https://github.com/dhr2333/beancount-guard/blob/main/docs/POSITIONING.md)
 
 ## The problem
 
@@ -45,7 +45,7 @@ If validation fails, the original ledger is unchanged. If the process crashes mi
 - Hosted services take custody of the ledger.
 - `beancount-guard` turns every write into a reviewed proposal, validates it with the same `bean-check` you already trust, and commits it atomically.
 
-See [docs/POSITIONING.md](docs/POSITIONING.md) for the full comparison and the project's place in the ecosystem.
+See [docs/POSITIONING.md](https://github.com/dhr2333/beancount-guard/blob/main/docs/POSITIONING.md) for the full comparison and the project's place in the ecosystem.
 
 ## What's inside
 
@@ -187,7 +187,7 @@ A frontend may manage this runtime for end users (a private venv plus install/re
 - **With Fava or an Obsidian plugin**: they remain the view; this project is the write boundary behind them.
 - **With a custom agent or script**: call the Python API or the JSON CLI; the same guard works regardless of the agent framework.
 
-The MCP surface is deliberately read-only. Write proposals use the stable JSON CLI or Python API, so a model is never handed direct write access to the ledger. See [docs/POSITIONING.md](docs/POSITIONING.md) for the reasoning and the competitive landscape.
+The MCP surface is deliberately read-only. Write proposals use the stable JSON CLI or Python API, so a model is never handed direct write access to the ledger. See [docs/POSITIONING.md](https://github.com/dhr2333/beancount-guard/blob/main/docs/POSITIONING.md) for the reasoning and the competitive landscape.
 
 ## Status and limits
 
@@ -203,6 +203,10 @@ The MCP surface is deliberately read-only. Write proposals use the stable JSON C
 - Reconciliation drift is not proactively alerted; `validate` / `reconcile-preview` do not return `reconciliation_drift`.
 - This library guarantees structure, atomicity, and auditability. It does not judge whether an agent picked the right category for a transaction.
 
+## Contributing
+
+See [CONTRIBUTING.md](https://github.com/dhr2333/beancount-guard/blob/main/CONTRIBUTING.md). The short version: keep the core standard-library only, add a test for every behavior change, and do not add an MCP write surface without updating `FROZEN.md` and `PROTOCOL`.
+
 ## Development
 
 ```bash
@@ -214,8 +218,12 @@ Tests run on temporary ledger copies and cover alias conflicts, reconciliation r
 
 ## CI
 
-Jenkins Multibranch Pipeline. The configuration and local equivalent commands are in [docs/CI.md](docs/CI.md).
+Jenkins Multibranch Pipeline. The configuration and local equivalent commands are in [docs/CI.md](https://github.com/dhr2333/beancount-guard/blob/main/docs/CI.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/dhr2333/beancount-guard/blob/main/LICENSE).
+
+## 中文摘要
+
+`beancount-guard` 是 Agent 与纯文本 Beancount 账本之间的写入边界。Agent 只能提交交易草稿或结构操作，人工批准后才落账；每次写入先在影子树由真实 `bean-check` 校验，再在写锁内原子替换，失败时原文件零改动。它不提供账本 UI、不做托管，也不把直接写权限交给模型。完整中文说明见 [README.zh-CN.md](https://github.com/dhr2333/beancount-guard/blob/main/README.zh-CN.md)。

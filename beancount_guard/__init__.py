@@ -21,6 +21,6 @@ from .core import BeancountGuard, create_beancount_guard
 from .errors import LedgerError, fail
 
 __all__ = ["BeancountGuard", "create_beancount_guard", "LedgerError", "fail", "PROTOCOL"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 # The CLI/MCP contract version; bump it only when a frontend must change.
 PROTOCOL = 1

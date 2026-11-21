@@ -211,6 +211,10 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 
 Jenkins Multibranch Pipeline，配置与本地等价命令见 [docs/CI.md](docs/CI.md)。
 
+## 贡献
+
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。简短版：核心保持只用标准库；行为变更要补测试；新增 MCP 写入面必须先更新 `FROZEN.md` 和 `PROTOCOL`。
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
