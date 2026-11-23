@@ -45,6 +45,7 @@ Agent 可以在毫秒内起草一笔交易。但纯文本账本没有事务边�
 ## 包含什么
 
 - **交易草稿队列。** 提交草稿不碰账本；批准时才渲染交易并追加。
+- **条目元数据。** 草稿可带可选的字符串 `metadata`（例如 `time`、`uuid`、`status`）；批准后写入交易，账单来源信息得以保留。见[草稿元数据](#草稿元数据)。
 - **结构操作队列。** Agent 发起的 `account-open`、`account-redate`、`account-metadata`、`balance` 都先入队等批准。
 - **统一写入门禁。** 每次账本变更都经过影子树校验、进程级写锁和原子替换。
 - **账本语义，而不只是语法。** 别名解析、对账周期、到期/逾期重建、对账 preview/commit、同 `asOf` 更新、历史记录、晚到草稿自动补 pad。
@@ -95,11 +96,34 @@ ledger.open_account(account="Assets:Savings:Bank:BOC0814", currencies=["CNY"], a
 ledger.update_draft(draft_id="draft-...", payload={"payee": "星巴克"})
 ledger.submit_draft({...})                        # 入队，不写账本
 ledger.approve_draft(draft_id="draft-...")        # 校验 → 原子追加
+
+# 草稿 metadata 可选、值必须是字符串；批准后成为交易 metadata。
+ledger.submit_draft({
+    "date": "2026-10-30",
+    "payee": "月梅早餐",
+    "narration": "早餐",
+    "metadata": {"time": "07:23:07", "uuid": "53110002338023202610300670672032", "status": "WeChat - 已转账"},
+    "postings": [
+        {"account": "Expenses:Food:Breakfast", "amount": "3.50", "currency": "CNY"},
+        {"account": "Assets:Savings:Web:WechatFund", "amount": "-3.50", "currency": "CNY"},
+    ],
+})
 ledger.query_transactions(date_from="2026-10-01", date_to="2026-10-31")
 ledger.query_balances(as_of="2026-11-17")
 ```
 
 `LedgerError` 带稳定的 `code`、`message`、`details`；适配层按 code 展示本地化文案，不解析人类文本。
+
+## 草稿元数据
+
+草稿 `metadata` 是可选的字符串键值对象：
+
+- 键匹配 `^[a-z][a-z0-9_-]*$`；`draft_id` 保留；
+- 最多 20 个键，每个值最多 200 字符；
+- 批准时按插入顺序渲染在 `draft_id` 与 postings 之前；
+- `update-draft` 未显式传 `metadata` 时保留原值；
+- metadata 参与去重 hash，同一交易换 `uuid` 不会被合并；
+- 只影响新批准的条目，不改写账本里已有的交易。
 
 ## 待办队列：人 vs Agent
 

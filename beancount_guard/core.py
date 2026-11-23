@@ -1000,6 +1000,7 @@ class BeancountGuard:
             "flag": document.get("flag", "*"),
             "payee": document.get("payee", ""),
             "narration": document.get("narration", ""),
+            "metadata": document.get("metadata", {}),
             "tags": document.get("tags", []),
             "links": document.get("links", []),
             "confidence": document.get("confidence"),

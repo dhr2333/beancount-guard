@@ -50,6 +50,7 @@ See [docs/POSITIONING.md](https://github.com/dhr2333/beancount-guard/blob/main/d
 ## What's inside
 
 - **Reviewed transaction drafts.** Submitting a draft never touches the ledger. Approval renders the transaction and appends it.
+- **Entry metadata.** A draft may carry an optional string `metadata` map (for example `time`, `uuid`, `status`); approval renders it into the transaction so imported bills keep their provenance. See [Draft metadata](#draft-metadata).
 - **Structure operation queue.** `account-open`, `account-redate`, `account-metadata`, and `balance` wait for approval when an agent proposes them.
 - **One write gate.** Shadow-tree validation, a process-level lock, and atomic replace for every ledger mutation.
 - **Ledger semantics, not just syntax.** Alias resolution, reconciliation periods, due/overdue rebuilds, reconciliation preview/commit, same-`asOf` updates, history, and auto-pad for late drafts.
@@ -100,11 +101,34 @@ ledger.open_account(account="Assets:Savings:Bank:BOC0814", currencies=["CNY"], a
 ledger.update_draft(draft_id="draft-...", payload={"payee": "Starbucks"})
 ledger.submit_draft({...})                        # enqueue, do not write
 ledger.approve_draft(draft_id="draft-...")        # validate -> atomic append
+
+# Draft metadata is optional and string-only; it becomes transaction metadata.
+ledger.submit_draft({
+    "date": "2026-10-30",
+    "payee": "月梅早餐",
+    "narration": "早餐",
+    "metadata": {"time": "07:23:07", "uuid": "53110002338023202610300670672032", "status": "WeChat - 已转账"},
+    "postings": [
+        {"account": "Expenses:Food:Breakfast", "amount": "3.50", "currency": "CNY"},
+        {"account": "Assets:Savings:Web:WechatFund", "amount": "-3.50", "currency": "CNY"},
+    ],
+})
 ledger.query_transactions(date_from="2026-10-01", date_to="2026-10-31")
 ledger.query_balances(as_of="2026-11-17")
 ```
 
 `LedgerError` carries a stable `code`, a `message`, and `details`. Adapters display localized text for the code; they never parse human text to recover meaning.
+
+## Draft metadata
+
+Draft `metadata` is an optional object of string keys to string values:
+
+- keys match `^[a-z][a-z0-9_-]*$`; `draft_id` is reserved;
+- at most 20 keys, each value at most 200 characters;
+- approval renders the entries in insertion order, before `draft_id` and postings;
+- `update-draft` keeps existing metadata unless `metadata` is supplied;
+- metadata participates in the dedupe hash, so the same transaction with a different `uuid` is not collapsed;
+- it only affects newly approved entries; existing ledger files are never rewritten.
 
 ## Pending queues: human vs agent
 

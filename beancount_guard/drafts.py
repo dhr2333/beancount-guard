@@ -35,6 +35,10 @@ FLAGS = {"*", "!"}
 SOURCE_KINDS = {"ai", "quickpath", "manual", "import", "external"}
 BLOCKING_ISSUES = {"unresolved_account", "unbalanced", "before_account_open", "closed_account"}
 CONTROL_RE = re.compile(r"[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]")
+RESERVED_METADATA = {"draft_id"}
+MAX_METADATA_KEYS = 20
+MAX_METADATA_VALUE = 200
+DRAFT_METADATA_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _now() -> str:
@@ -53,6 +57,35 @@ def prose(value: object, label: str, *, max_length: int = 200, allow_empty: bool
     if len(text) > max_length:
         fail("invalid_draft", f"{label} must be at most {max_length} characters")
     return text
+
+
+def normalize_metadata(value: object) -> dict[str, str]:
+    """Validate optional transaction metadata carried by a draft.
+
+    Values are strings so the renderer can quote them without type ambiguity;
+    insertion order is preserved because it is the order written to the ledger.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        fail("invalid_draft", "metadata must be an object")
+    if len(value) > MAX_METADATA_KEYS:
+        fail("invalid_draft", f"metadata must have at most {MAX_METADATA_KEYS} entries")
+    metadata: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or DRAFT_METADATA_KEY_RE.match(key) is None:
+            fail("invalid_draft", f'"{key}" is not a valid metadata key (lowercase letters, digits, _ or -)')
+        if key in RESERVED_METADATA:
+            fail("invalid_draft", f'"{key}" is reserved by the draft protocol')
+        if not isinstance(item, str):
+            fail("invalid_draft", f"metadata.{key} must be a string")
+        if CONTROL_RE.search(item):
+            fail("invalid_draft", f"metadata.{key} must not contain control or bidirectional-override characters")
+        text = item.strip()
+        if len(text) > MAX_METADATA_VALUE:
+            fail("invalid_draft", f"metadata.{key} must be at most {MAX_METADATA_VALUE} characters")
+        metadata[key] = text
+    return metadata
 
 
 def normalize_posting(
@@ -195,6 +228,7 @@ def normalize_draft_input(
 
     tags = _normalize_tokens(payload.get("tags"), "tags", 10)
     links = _normalize_tokens(payload.get("links"), "links", 10)
+    metadata = normalize_metadata(payload.get("metadata"))
 
     raw_source = payload.get("source") if payload.get("source") is not None else {}
     if not isinstance(raw_source, dict):
@@ -227,6 +261,7 @@ def normalize_draft_input(
         "flag": flag,
         "payee": payee,
         "narration": narration,
+        "metadata": metadata,
         "tags": tags,
         "links": links,
         "postings": postings,
@@ -284,6 +319,7 @@ def hash_payload(draft: dict[str, Any]) -> str:
         "flag": draft["flag"],
         "payee": draft["payee"],
         "narration": draft["narration"],
+        "metadata": draft.get("metadata", {}),
         "tags": draft["tags"],
         "links": draft["links"],
         "postings": [
@@ -312,6 +348,15 @@ def is_draft_document(value: object) -> bool:
         return False
     if not isinstance(value.get("tags"), list) or not isinstance(value.get("links"), list):
         return False
+    metadata = value.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, dict) or len(metadata) > MAX_METADATA_KEYS:
+            return False
+        for key, item in metadata.items():
+            if not isinstance(key, str) or DRAFT_METADATA_KEY_RE.match(key) is None or key in RESERVED_METADATA:
+                return False
+            if not isinstance(item, str) or len(item) > MAX_METADATA_VALUE or CONTROL_RE.search(item):
+                return False
     postings = value.get("postings")
     if not isinstance(postings, list) or len(postings) < 2:
         return False
@@ -455,6 +500,7 @@ class DraftStore:
                 "flag": payload.get("flag", document["flag"]),
                 "payee": payload.get("payee", document["payee"]),
                 "narration": payload.get("narration", document["narration"]),
+                "metadata": payload.get("metadata", document.get("metadata", {})),
                 "tags": payload.get("tags", document["tags"]),
                 "links": payload.get("links", document["links"]),
                 "postings": payload.get("postings", document["postings"]),
@@ -561,6 +607,7 @@ class DraftStore:
                     "flag": document["flag"],
                     "payee": document["payee"],
                     "narration": document["narration"],
+                    "metadata": document.get("metadata") or {},
                     "tags": document["tags"],
                     "links": document["links"],
                     "draft_id": draft_id,

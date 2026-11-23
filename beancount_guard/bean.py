@@ -305,6 +305,8 @@ def render_transaction(transaction: dict[str, Any]) -> str:
         for key, value in metadata.items():
             if not isinstance(key, str) or METADATA_KEY_RE.match(key) is None:
                 fail("invalid_metadata", f'"{key}" is not a valid Beancount metadata key')
+            if key == "draft_id":
+                fail("invalid_metadata", "draft_id is reserved by the transaction renderer")
             lines.append(f"  {key}: {quote(str(value))}")
     draft_id = transaction.get("draft_id")
     if isinstance(draft_id, str) and draft_id:

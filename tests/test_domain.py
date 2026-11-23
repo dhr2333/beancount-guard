@@ -310,6 +310,74 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(self.ledger.list_drafts(status="pending"), [])
 
+    def test_draft_metadata_rendered_preserved_and_deduped(self) -> None:
+        payload = {
+            "date": TODAY,
+            "payee": "月梅早餐",
+            "narration": "早餐",
+            "metadata": {
+                "time": "07:23:07",
+                "uuid": "53110002338023202610300670672032",
+                "status": "WeChat - 已转账",
+            },
+            "postings": [
+                {"account": "餐饮", "amount": "3.50", "currency": "CNY"},
+                {"account": "测试卡", "amount": "-3.50", "currency": "CNY"},
+            ],
+            "source": {"kind": "ai", "ref": "wechat.csv"},
+        }
+        first = self.ledger.submit_draft(payload)
+        self.assertFalse(first["deduplicated"])
+        draft_id = first["draft"]["id"]
+        self.assertEqual(first["draft"]["metadata"], payload["metadata"])
+
+        second = self.ledger.submit_draft({
+            **payload,
+            "metadata": {**payload["metadata"], "uuid": "other-uuid"},
+        })
+        self.assertFalse(second["deduplicated"])
+        self.assertNotEqual(second["draft"]["id"], draft_id)
+
+        updated = self.ledger.update_draft(draft_id=draft_id, payload={"narration": "早餐（改）"})
+        self.assertEqual(updated["draft"]["metadata"], payload["metadata"])
+        self.assertEqual(updated["draft"]["narration"], "早餐（改）")
+
+        approved = self.ledger.approve_draft(draft_id=draft_id, actor="test")
+        self.assertTrue(approved["committed"])
+        content = self.read("trans/collect.bean")
+        self.assertIn('  time: "07:23:07"\n', content)
+        self.assertIn('  uuid: "53110002338023202610300670672032"\n', content)
+        self.assertIn('  status: "WeChat - 已转账"\n', content)
+        self.assertLess(content.index('time: "07:23:07"'), content.index(f'draft_id: "{draft_id}"'))
+        self.assertLess(content.index(f'draft_id: "{draft_id}"'), content.index("Expenses:Food  3.50 CNY"))
+        self.assertEqual(self.ledger.validate(), {"ok": True, "diagnostic": ""})
+
+    def test_draft_metadata_rejects_invalid_shape(self) -> None:
+        base = {
+            "date": TODAY,
+            "payee": "月梅早餐",
+            "narration": "早餐",
+            "postings": [
+                {"account": "餐饮", "amount": "3.50", "currency": "CNY"},
+                {"account": "测试卡", "amount": "-3.50", "currency": "CNY"},
+            ],
+            "source": {"kind": "ai"},
+        }
+        cases = [
+            "not-an-object",
+            {"Time": "07:23:07"},
+            {"draft_id": "x"},
+            {"time": 723},
+            {f"k{index}": "v" for index in range(21)},
+            {"time": "07:23:07\n"},
+        ]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                self.assert_code(
+                    "invalid_draft",
+                    lambda metadata=metadata: self.ledger.submit_draft({**base, "metadata": metadata}),
+                )
+
     def test_unresolved_and_unbalanced_stay_out(self) -> None:
         before = self.read("trans/collect.bean")
         unresolved = self.ledger.submit_draft(
