@@ -113,6 +113,17 @@ def _build_parser() -> argparse.ArgumentParser:
     get_draft = commands.add_parser("get-draft")
     get_draft.add_argument("draft_id")
     commands.add_parser("submit-draft")
+    commands.add_parser("submit-batch")
+    list_batches = commands.add_parser("list-batches")
+    list_batches.add_argument("--limit", type=int, default=50)
+    approve_batch = commands.add_parser("approve-batch")
+    approve_batch.add_argument("--batch", default=None)
+    approve_batch.add_argument("--ref", default=None)
+    reject_batch = commands.add_parser("reject-batch")
+    reject_batch.add_argument("--batch", required=True)
+    reject_batch.add_argument("--reason", default="")
+    void_batch = commands.add_parser("void-batch")
+    void_batch.add_argument("--batch", required=True)
     commands.add_parser("update-draft")
     commands.add_parser("account-open")
     commands.add_parser("account-redate")
@@ -232,6 +243,17 @@ def _dispatch(args: argparse.Namespace, domain: BeancountGuard) -> Any:
     if command == "submit-draft":
         stored = domain.submit_draft(_read_payload())
         return {"draft": domain.project_draft(stored["draft"]), "deduplicated": stored["deduplicated"]}
+    if command == "submit-batch":
+        stored = domain.submit_batch(_read_payload())
+        return {"batch": stored["batch"], "items": stored["items"]}
+    if command == "list-batches":
+        return {"batches": domain.list_batches(limit=args.limit)}
+    if command == "approve-batch":
+        return {"result": domain.approve_batch(batch=args.batch, ref=args.ref)}
+    if command == "reject-batch":
+        return {"result": domain.reject_batch(batch=args.batch, reason=args.reason or "")}
+    if command == "void-batch":
+        return {"result": domain.void_batch(batch=args.batch)}
     if command == "update-draft":
         payload = _read_payload()
         draft_id = payload.get("id")

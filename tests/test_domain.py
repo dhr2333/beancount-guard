@@ -139,10 +139,10 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(ledger.setup()["title"], "测试账本")
         self.assertEqual(ledger.validate(), {"ok": True, "diagnostic": ""})
         names = [account["name"] for account in ledger.list_accounts()]
-        self.assertIn("中国银行", names)
-        self.assertIn("招商银行", names)
-        self.assertEqual(ledger.resolve_alias("中国银行")["account"], "Assets:Savings:Bank:BOC")
-        self.assertEqual(ledger.resolve_alias("招商银行")["account"], "Liabilities:CreditCard:Bank:CMB")
+        self.assertIn("现金", names)
+        self.assertNotIn("中国银行", names)
+        self.assertNotIn("招商银行", names)
+        self.assertEqual(ledger.resolve_alias("现金")["account"], "Assets:Savings:Cash")
         self.assert_code("ledger_exists", lambda: ledger.init_ledger(title="再一次"))
 
     def test_init_refuses_a_non_empty_directory(self) -> None:
@@ -634,7 +634,7 @@ class DomainTest(unittest.TestCase):
             }
         )["draft"]
         self.assertFalse(draft["approvable"])
-        self.assertEqual([i["code"] for i in draft["issues"]], ["unresolved_account"])
+        self.assertEqual([i["code"] for i in draft["issues"]], ["funding_unresolved"])
 
         operation = self.ledger.submit_operation(
             {
@@ -1093,6 +1093,200 @@ class ReconciliationTest(unittest.TestCase):
         self.assertEqual(account["nextDue"], "2026-11-18")
         self.assertEqual(account["coveredThrough"], TODAY)
         self.assertTrue(self.ledger.validate()["ok"])
+
+
+class BatchTest(unittest.TestCase):
+    """Import batch, posting role, uuid idempotency and void semantics."""
+
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.ledger = self.fixture.domain()
+
+    def tearDown(self) -> None:
+        self.fixture.dispose()
+
+    def assert_code(self, code: str, call) -> LedgerError:
+        with self.assertRaises(LedgerError) as caught:
+            call()
+        self.assertEqual(caught.exception.code, code, caught.exception)
+        return caught.exception
+
+    def read(self, relative: str) -> str:
+        return (self.fixture.root / relative).read_text(encoding="utf-8")
+
+    def draft(self, payee: str, amount: str = "10.00", uuid: str | None = None, category: str | None = "Expenses:Food"):
+        postings = [
+            {"account": category, "suggested": None if category else "母婴", "role": "category",
+             "amount": amount, "currency": "CNY"},
+            {"account": "Assets:Bank:Test", "amount": f"-{amount}", "currency": "CNY"},
+        ]
+        payload = {"date": TODAY, "payee": payee, "narration": payee, "postings": postings}
+        if uuid:
+            payload["metadata"] = {"uuid": uuid}
+        return payload
+
+    def test_role_and_fallback_are_projected(self) -> None:
+        submitted = self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "角色",
+                "postings": [
+                    {"account": None, "suggested": "母婴", "role": "category", "fallback": "expense",
+                     "amount": "10.00", "currency": "CNY"},
+                    {"account": None, "suggested": "Assets:Bank:Later", "role": "funding",
+                     "amount": "-10.00", "currency": "CNY"},
+                ],
+            }
+        )
+        codes = [issue["code"] for issue in submitted["issues"]]
+        self.assertIn("unresolved_account", codes)
+        self.assertIn("funding_unresolved", codes)
+        projected = self.ledger.project_draft(submitted["draft"])
+        self.assertEqual(projected["postings"][0]["role"], "category")
+        self.assertEqual(projected["postings"][0]["fallback"], "expense")
+        self.assertEqual(projected["postings"][1]["role"], "funding")
+
+    def test_source_evidence_is_projected(self) -> None:
+        payload = self.draft("原始行")
+        payload["source"] = {
+            "kind": "import",
+            "ref": "bill",
+            "evidence": {"交易对方": "美团", "支付方式": "零钱"},
+        }
+        submitted = self.ledger.submit_draft(payload)
+        projected = self.ledger.project_draft(submitted["draft"])
+        self.assertEqual(projected["source"]["evidence"], {"交易对方": "美团", "支付方式": "零钱"})
+
+    def test_unresolved_funding_is_blocking_and_not_fallbackable(self) -> None:
+        draft = self.ledger.submit_draft(self.draft("卡未开", category="Expenses:Food"))["draft"]
+        # replace the funding posting with a not-yet-open account
+        draft = self.ledger.update_draft(
+            draft_id=draft["id"],
+            payload={
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "10.00", "currency": "CNY"},
+                    {"account": None, "suggested": "Assets:Bank:Later", "role": "funding",
+                     "amount": "-10.00", "currency": "CNY"},
+                ]
+            },
+        )["draft"]
+        self.assertFalse(draft["approvable"])
+        self.assertIn("funding_unresolved", [issue["code"] for issue in draft["issues"]])
+        result = self.ledger.approve_all_drafts()
+        self.assertEqual(result["approved"], 0)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertNotIn("Later", self.read("trans/collect.bean"))
+
+    def test_no_real_account_is_rejected(self) -> None:
+        draft = self.ledger.submit_draft(
+            {
+                "date": TODAY,
+                "payee": "无真实账户",
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "10.00", "currency": "CNY"},
+                    {"account": "Equity:Adjustments", "amount": "-10.00", "currency": "CNY"},
+                ],
+            }
+        )["draft"]
+        self.assertFalse(draft["approvable"])
+        self.assertIn("no_real_account", [issue["code"] for issue in draft["issues"]])
+        self.assert_code("no_real_account", lambda: self.ledger.approve_draft(draft_id=draft["id"]))
+        self.assertNotIn("无真实账户", self.read("trans/collect.bean"))
+
+    def test_uuid_dedupe_uses_the_ledger_not_the_queue(self) -> None:
+        draft = self.ledger.submit_draft(self.draft("幂等", uuid="uuid-dedupe-1"))["draft"]
+        pending_error = self.assert_code(
+            "duplicate_transaction",
+            lambda: self.ledger.submit_draft(self.draft("幂等改额", "11.00", "uuid-dedupe-1")),
+        )
+        self.assertEqual(pending_error.details.get("scope"), "pending")
+        self.ledger.approve_draft(draft_id=draft["id"])
+        error = self.assert_code(
+            "duplicate_transaction",
+            lambda: self.ledger.submit_draft(self.draft("幂等副本", uuid="uuid-dedupe-1")),
+        )
+        self.assertEqual(error.details.get("file"), "trans/collect.bean")
+        self.assertEqual(self.read("trans/collect.bean").count('uuid: "uuid-dedupe-1"'), 1)
+
+    def test_batch_submit_approve_and_coverage(self) -> None:
+        payload = {
+            "source": {"kind": "import", "ref": "账单 A", "rows": 3},
+            "claimed": {"net": "10.00", "currency": "CNY"},
+            "skipped": [{"index": 2, "reason": "交易关闭", "amount": "1.00"}],
+            "drafts": [self.draft("批次一", uuid="batch-uuid-1"), self.draft("批次二", "20.00", "batch-uuid-2")],
+        }
+        submitted = self.ledger.submit_batch(payload)
+        batch = submitted["batch"]
+        self.assertEqual(batch["counts"]["drafts"], 2)
+        self.assertEqual(batch["counts"]["failed"], 0)
+        drafts = [d for d in self.ledger.list_drafts(status="pending") if d.get("batch") == batch["id"]]
+        self.assertEqual(len(drafts), 2)
+        summary = next(item for item in self.ledger.list_batches() if item["id"] == batch["id"])
+        self.assertEqual(summary["coverage"], {"rows": 3, "covered": 3, "ok": True})
+        self.assertEqual(summary["status"], "pending")
+        result = self.ledger.approve_batch(batch=batch["id"])
+        self.assertEqual(result["approved"], 2)
+        self.assertEqual(result["skipped"], [])
+        summary = next(item for item in self.ledger.list_batches() if item["id"] == batch["id"])
+        self.assertEqual(summary["status"], "approved")
+        self.assertEqual(summary["countsByStatus"]["approved"], 2)
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_batch_duplicate_and_reject(self) -> None:
+        first = self.ledger.submit_batch(
+            {"source": {"kind": "manual", "ref": "重复源", "rows": 1}, "drafts": [self.draft("原始", uuid="batch-dup-1")]}
+        )["batch"]
+        self.ledger.approve_batch(batch=first["id"])
+        duplicate = self.ledger.submit_batch(
+            {"source": {"kind": "manual", "ref": "重复源 2", "rows": 1}, "drafts": [self.draft("重复", uuid="batch-dup-1")]}
+        )
+        self.assertEqual(duplicate["batch"]["counts"]["duplicates"], 1)
+        self.assertEqual(duplicate["items"][0]["code"], "duplicate_transaction")
+
+        second = self.ledger.submit_batch(
+            {"source": {"kind": "manual", "ref": "驳回源", "rows": 1}, "drafts": [self.draft("待驳回", uuid="batch-reject-1")]}
+        )["batch"]
+        rejected = self.ledger.reject_batch(batch=second["id"], reason="测试驳回")
+        self.assertEqual(rejected["rejected"], 1)
+        summary = next(item for item in self.ledger.list_batches() if item["id"] == second["id"])
+        self.assertEqual(summary["status"], "rejected")
+
+    def test_batch_void_appends_reversals(self) -> None:
+        batch = self.ledger.submit_batch(
+            {"source": {"kind": "manual", "ref": "冲销源", "rows": 1}, "drafts": [self.draft("待冲销", uuid="batch-void-1")]}
+        )["batch"]
+        self.ledger.approve_batch(batch=batch["id"])
+        result = self.ledger.void_batch(batch=batch["id"])
+        self.assertEqual(result["voided"], 1)
+        content = self.read("trans/collect.bean")
+        self.assertIn('void_of: "draft-', content)
+        self.assertIn("冲销：待冲销", content)
+        self.assert_code("batch_already_voided", lambda: self.ledger.void_batch(batch=batch["id"]))
+        summary = next(item for item in self.ledger.list_batches() if item["id"] == batch["id"])
+        self.assertEqual(summary["status"], "voided")
+        self.assertEqual(summary["countsByStatus"]["voided"], 1)
+        self.assertTrue(self.ledger.validate()["ok"])
+
+    def test_batch_approve_skips_unclassified(self) -> None:
+        batch = self.ledger.submit_batch(
+            {"source": {"kind": "manual", "ref": "未分类源", "rows": 1},
+             "drafts": [self.draft("未分类", category=None)]}
+        )["batch"]
+        result = self.ledger.approve_batch(batch=batch["id"])
+        self.assertEqual(result["approved"], 0)
+        self.assertEqual(len(result["skipped"]), 1)
+        draft = [item for item in self.ledger.list_drafts(status="pending") if item.get("batch") == batch["id"]][0]
+        self.ledger.update_draft(
+            draft_id=draft["id"],
+            payload={
+                "postings": [
+                    {"account": "Expenses:Food", "amount": "10.00", "currency": "CNY"},
+                    {"account": "Assets:Bank:Test", "amount": "-10.00", "currency": "CNY"},
+                ]
+            },
+        )
+        result = self.ledger.approve_batch(batch=batch["id"])
+        self.assertEqual(result["approved"], 1)
 
 
 class ContractTest(unittest.TestCase):

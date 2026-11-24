@@ -65,9 +65,6 @@ def _assets(today: str) -> str:
 {today} open Assets:Savings:Cash CNY
   alias: "现金"
 
-{today} open Assets:Savings:Bank:BOC CNY
-  alias: "中国银行"
-
 {today} open Assets:Savings:Web:AliPay CNY
   alias: "支付宝"
 
@@ -85,9 +82,7 @@ def _assets(today: str) -> str:
 
 
 def _liabilities(today: str) -> str:
-    return f"""; 负债。
-{today} open Liabilities:CreditCard:Bank:CMB CNY
-  alias: "招商银行"
+    return f"""; 负债。模板不预置信用卡；通过 account-open 添加。
 """
 
 

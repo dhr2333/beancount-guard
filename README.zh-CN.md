@@ -46,6 +46,7 @@ Agent 可以在毫秒内起草一笔交易。但纯文本账本没有事务边�
 
 - **交易草稿队列。** 提交草稿不碰账本；批准时才渲染交易并追加。
 - **条目元数据。** 草稿可带可选的字符串 `metadata`（例如 `time`、`uuid`、`status`）；批准后写入交易，账单来源信息得以保留。见[草稿元数据](#草稿元数据)。
+- **导入批次。** `submit-batch` 把一次导入的行数、跳过行、草稿与声明放进一个批次；`metadata.uuid` 对账本去重；批次可整批批准、驳回或冲销（追加反向交易）。
 - **结构操作队列。** Agent 发起的 `account-open`、`account-redate`、`account-metadata`、`balance` 都先入队等批准。
 - **统一写入门禁。** 每次账本变更都经过影子树校验、进程级写锁和原子替换。
 - **账本语义，而不只是语法。** 别名解析、对账周期、到期/逾期重建、对账 preview/commit、同 `asOf` 更新、历史记录、晚到草稿自动补 pad。
@@ -129,7 +130,7 @@ ledger.query_balances(as_of="2026-11-17")
 
 人在界面上点的操作（开户、改别名/周期、对账）本身就是人工确认，直接执行。Agent 发起的写入一律入队等批准：
 
-- 交易进草稿队列（`submit-draft`）。
+- 交易进草稿队列（`submit-draft` 或 `submit-batch`）。
 - 结构变更进操作队列（`submit-operation`，kind 取 `account-open` / `account-redate` / `account-metadata` / `balance`）。
 
 批准结构变更时，本库会自动重算待审草稿的账户解析，让原本卡在 `unresolved_account` 的草稿立刻可批。
@@ -154,6 +155,11 @@ python -m beancount_guard --root /path/to/ledger bootstrap
 python -m beancount_guard --root /path/to/ledger balance <<'JSON'
 {"account": "工行5244", "amount": "-30.00", "currency": "CNY"}
 JSON
+python -m beancount_guard --root /path/to/ledger submit-batch < batch.json
+python -m beancount_guard --root /path/to/ledger list-batches
+python -m beancount_guard --root /path/to/ledger approve-batch --batch <id>
+python -m beancount_guard --root /path/to/ledger reject-batch --batch <id>
+python -m beancount_guard --root /path/to/ledger void-batch --batch <id>
 ```
 
 stdout 固定为：

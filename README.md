@@ -130,11 +130,41 @@ Draft `metadata` is an optional object of string keys to string values:
 - metadata participates in the dedupe hash, so the same transaction with a different `uuid` is not collapsed;
 - it only affects newly approved entries; existing ledger files are never rewritten.
 
+## Import batches
+
+A batch is the agent's import envelope around the draft queue. It is bookkeeping
+for review and audit, never a ledger write by itself.
+
+```bash
+python -m beancount_guard --root /path/to/ledger submit-batch <<'JSON'
+{
+  "source": {"kind": "import", "ref": "Alipay 2026-10", "rows": 90},
+  "claimed": {"net": "9084.32", "currency": "CNY"},
+  "skipped": [{"index": 7, "reason": "closed order", "amount": "18.00"}],
+  "drafts": [ ... standard draft payloads ... ]
+}
+JSON
+```
+
+- `source.rows` is the claimed source row count; `skipped` lists rows deliberately
+  not drafted. The panel checks `drafts + skipped + duplicates + failed == rows`.
+- `metadata.uuid` is an idempotency key: a uuid already rendered in
+  `trans/*.bean`, or used by another pending draft with different content, is
+  rejected with `duplicate_transaction`.
+- A posting can add `role` (`category` / `funding`) and `fallback`
+  (`expense` / `income`). An unresolved `funding` posting is `funding_unresolved`
+  and blocks approval; it is never rewritten to a fallback account.
+- Approval requires at least one `Assets:` / `Liabilities:` posting
+  (`no_real_account` otherwise).
+- `approve-batch`, `reject-batch` and `void-batch` operate on one batch. Void
+  appends reversing entries dated today, validates the whole shadow tree once,
+  and records `void_of` / `batch` metadata; it never deletes or rewrites history.
+
 ## Pending queues: human vs agent
 
 Operations a human clicks in a UI (opening an account, changing an alias or period, reconciling) are already confirmed, so they execute directly. Writes initiated by an agent always enter a queue and wait for human approval:
 
-- Transactions enter the draft queue (`submit-draft`).
+- Transactions enter the draft queue (`submit-draft` or `submit-batch`).
 - Structure changes enter the operation queue (`submit-operation`, with kind `account-open` / `account-redate` / `account-metadata` / `balance`).
 
 Approving a structure operation automatically re-resolves pending drafts against the updated account set, so drafts previously blocked on `unresolved_account` can become approvable immediately.
@@ -168,7 +198,7 @@ stdout is always one of:
 {"ok": false, "error": {"code": "...", "message": "...", "details": {}}}
 ```
 
-Business failures still exit `0`; usage or internal errors exit `1`. Commands: `health`, `setup`, `init`, `bootstrap`, `status`, `accounts`, `resolve`, `due`, `metadata`, `account-open`, `account-redate`, `balance`, `reconcile-preview`, `reconcile-commit`, `reconcile-history`, `refresh-drafts`, `approve-all-drafts`, `op-submit`, `op-list`, `op-get`, `op-approve`, `op-approve-all`, `op-reject`, `list-drafts`, `get-draft`, `submit-draft`, `update-draft`, `approve-draft`, `reject-draft`, `quick-draft`, `query-transactions`, `query-balances`, `validate`, `audit-metadata`.
+Business failures still exit `0`; usage or internal errors exit `1`. Commands: `health`, `setup`, `init`, `bootstrap`, `status`, `accounts`, `resolve`, `due`, `metadata`, `account-open`, `account-redate`, `balance`, `reconcile-preview`, `reconcile-commit`, `reconcile-history`, `refresh-drafts`, `approve-all-drafts`, `op-submit`, `op-list`, `op-get`, `op-approve`, `op-approve-all`, `op-reject`, `list-drafts`, `get-draft`, `submit-draft`, `submit-batch`, `list-batches`, `approve-batch`, `reject-batch`, `void-batch`, `update-draft`, `approve-draft`, `reject-draft`, `quick-draft`, `query-transactions`, `query-balances`, `validate`, `audit-metadata`.
 
 ## Runtime
 
@@ -219,6 +249,7 @@ The MCP surface is deliberately read-only. Write proposals use the stable JSON C
 - Importing an existing ledger (directory picker, validation, takeover) is not implemented; point `root` at an existing ledger instead.
 - Transactions and reconciliation write `trans/collect.bean` and `trans/reconciliation.bean`; create appends, update replaces the latest block in place. A missing file returns `ledger_not_initialized`.
 - Drafts support only `*` / `!`. Every posting must carry an explicit amount. Costs, prices, and automatic balancing are not supported.
+- Batches are runtime state under `.ledger/batches/`; deleting `.ledger/` loses batch history but never the ledger. A batch cannot be partially voided.
 - Accounts created implicitly by `auto_accounts`, with no `open` directive, can be queried, reconciled, and used in drafts, but cannot carry aliases or periods.
 - `bean-check` / `bean-query` are external programs; the Beancount Python package is never imported.
 - Ledger files must be UTF-8. The read side reports `invalid_encoding`; writes return `ledger_encoding_error`. GBK/ANSI files must be saved as UTF-8 first.

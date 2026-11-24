@@ -7,13 +7,25 @@ The design baseline is v0.26. This repository now implements:
 - fixed append targets `trans/collect.bean` / `trans/reconciliation.bean`;
 - draft `update-draft`;
 - optional draft `metadata` (0.1.2), rendered into the approved transaction before `draft_id` and postings; this is an explicit user-requested exception to the feature freeze;
+- import batches (unreleased): `submit-batch`, `list-batches`, `approve-batch`, `reject-batch`, `void-batch`; a batch envelope stores the claimed row count, skipped rows and draft ids under `.ledger/batches/`;
+- posting `role` (`category` / `funding`) and `fallback` (`expense` / `income`), with `funding_unresolved` blocking approval and a `no_real_account` invariant at approval;
+- `metadata.uuid` idempotency checked against rendered ledger metadata, not only the pending queue; same-batch and pending-uuid conflicts are rejected;
+- batch void appends reversing entries in one shadow-validated write; it never deletes or rewrites history;
 - `account-open`, `account-redate`, `account-metadata` and `balance` operation queues;
 - `init_ledger` from the built-in template;
 - the local read-only MCP server (`beancount_guard.mcp_server`) with BQL;
 - the MVP-1 reconciliation closed loop: due/unreconciled, preview/commit, same-`asOf` update, history, auto-pad on late drafts;
-- 53 test methods (49 domain, 4 CLI contract).
+- 61 test methods (57 domain, 4 CLI contract).
 
 Still out: `account-close`, reconcile revoke (explicitly not done), month-end batch (explicitly not done), multi-currency (not planned).
+
+## 2026-11-23 import batch exception
+
+The human owner explicitly requested the import-batch slice after a real 90-row
+Alipay import. This lifts the feature freeze for that slice only; no version is
+bumped here. The MCP surface stays read-only: batch commands are JSON CLI / Python
+API proposals, and the plugin's `ledger_*` Agent tools only enqueue proposals.
+`PROTOCOL` stays 1 because every addition is optional and additive.
 
 ## Positioning (2026-11-20)
 

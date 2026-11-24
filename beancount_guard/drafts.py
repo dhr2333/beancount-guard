@@ -18,22 +18,28 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .amounts import assert_amount, from_scaled, normalize_amount, to_scaled
+from .batches import BATCH_ID_RE, SOURCE_KINDS, BatchStore, normalize_batch_envelope
 from .bean import (
     TAG_RE,
     append_block,
     contains_draft_id,
+    is_account_name,
     is_currency,
+    quote,
     render_transaction,
 )
 from .dates import add_days, is_date, iso, today_in_zone
-from .errors import fail
-from .ledger import has_account, resolve_name
+from .errors import LedgerError, fail
+from .ledger import has_account, project_name, resolve_name
 from .target import resolve_append_target
 from .validation import atomic_write, validate_ledger, write_lock
 
 FLAGS = {"*", "!"}
-SOURCE_KINDS = {"ai", "quickpath", "manual", "import", "external"}
-BLOCKING_ISSUES = {"unresolved_account", "unbalanced", "before_account_open", "closed_account"}
+ROLES = {"category", "funding"}
+FALLBACKS = {"expense", "income"}
+BLOCKING_ISSUES = {"unresolved_account", "funding_unresolved", "no_real_account", "unbalanced", "before_account_open", "closed_account"}
+ACCOUNT_ROOTS = {"Assets", "Liabilities", "Equity", "Income", "Expenses"}
+FUNDING_ROOTS = {"Assets", "Liabilities"}
 CONTROL_RE = re.compile(r"[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]")
 RESERVED_METADATA = {"draft_id"}
 MAX_METADATA_KEYS = 20
@@ -88,6 +94,45 @@ def normalize_metadata(value: object) -> dict[str, str]:
     return metadata
 
 
+def infer_posting_role(account: str | None, suggested: str | None, explicit: object = None) -> str:
+    """Return ``category`` or ``funding``; the resolved account wins over a hint."""
+    declared = ""
+    if explicit is not None:
+        if not isinstance(explicit, str):
+            fail("invalid_draft", "role must be a string")
+        declared = explicit.strip()
+        if declared != "" and declared not in ROLES:
+            fail("invalid_draft", f'"role" must be one of {", ".join(sorted(ROLES))}')
+    if account is not None:
+        inferred = "funding" if account.split(":", 1)[0] in FUNDING_ROOTS else "category"
+        if declared != "" and declared != inferred:
+            fail(
+                "invalid_draft",
+                f'role "{declared}" conflicts with the resolved account {account}',
+                {"account": account},
+            )
+        return inferred
+    if isinstance(suggested, str) and is_account_name(suggested):
+        return "funding" if suggested.split(":", 1)[0] in FUNDING_ROOTS else "category"
+    return declared or "category"
+
+
+def normalize_fallback(value: object, role: str) -> str | None:
+    """Validate the optional fallback hint used for unclassified category postings."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        fail("invalid_draft", "fallback must be a string")
+    text = value.strip()
+    if text == "":
+        return None
+    if text not in FALLBACKS:
+        fail("invalid_draft", f'"fallback" must be one of {", ".join(sorted(FALLBACKS))}')
+    if role != "category":
+        fail("invalid_draft", "fallback is only valid on category postings")
+    return text
+
+
 def normalize_posting(
     posting: object,
     state: dict[str, Any],
@@ -113,26 +158,33 @@ def normalize_posting(
         resolution = resolve_name(state, raw_account)
         if resolution is None:
             suggested = raw_account
-            issues.append(
-                {
-                    "code": "unresolved_account",
-                    "message": f'postings[{index}]: "{raw_account}" is not a known account or alias',
-                    "postingIndex": index,
-                    "suggested": raw_account,
-                }
-            )
         else:
             account = resolution["account"]
     else:
         suggested = raw_suggested
-        issues.append(
-            {
-                "code": "unresolved_account",
-                "message": f"postings[{index}]: unclassified ({raw_suggested})",
-                "postingIndex": index,
-                "suggested": raw_suggested,
-            }
-        )
+
+    role = infer_posting_role(account, suggested, posting.get("role"))
+    fallback = normalize_fallback(posting.get("fallback"), role)
+
+    if account is None:
+        if role == "funding":
+            issues.append(
+                {
+                    "code": "funding_unresolved",
+                    "message": f'postings[{index}]: funding account "{suggested}" is not open yet',
+                    "postingIndex": index,
+                    "suggested": suggested,
+                }
+            )
+        else:
+            issues.append(
+                {
+                    "code": "unresolved_account",
+                    "message": f"postings[{index}]: unclassified ({suggested})",
+                    "postingIndex": index,
+                    "suggested": suggested,
+                }
+            )
 
     if account is not None:
         opened = state["opens"].get(account)
@@ -155,7 +207,14 @@ def normalize_posting(
                     "account": account,
                 }
             )
-    return {"account": account, "suggested": suggested, "amount": amount, "currency": currency}
+    return {
+        "account": account,
+        "suggested": suggested,
+        "role": role,
+        "fallback": fallback,
+        "amount": amount,
+        "currency": currency,
+    }
 
 
 def check_balanced(postings: list[dict[str, Any]], issues: list[dict[str, Any]]) -> bool:
@@ -178,6 +237,20 @@ def check_balanced(postings: list[dict[str, Any]], issues: list[dict[str, Any]])
         )
         return False
     return True
+
+
+def check_real_account(postings: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
+    """A rendered transaction must move at least one real asset or liability."""
+    if any(posting.get("account") is None for posting in postings):
+        return
+    if any((posting.get("account") or "").split(":", 1)[0] in FUNDING_ROOTS for posting in postings):
+        return
+    issues.append(
+        {
+            "code": "no_real_account",
+            "message": "the transaction has no asset or liability posting",
+        }
+    )
 
 
 def _normalize_tokens(value: object, label: str, maximum: int) -> list[str]:
@@ -225,6 +298,7 @@ def normalize_draft_input(
         for index, posting in enumerate(raw_postings)
     ]
     check_balanced(postings, issues)
+    check_real_account(postings, issues)
 
     tags = _normalize_tokens(payload.get("tags"), "tags", 10)
     links = _normalize_tokens(payload.get("links"), "links", 10)
@@ -275,11 +349,16 @@ def assess_draft(document: dict[str, Any], state: dict[str, Any], *, today: str)
     issues: list[dict[str, Any]] = []
     for index, posting in enumerate(document.get("postings") or []):
         account = posting.get("account")
+        role = infer_posting_role(account, posting.get("suggested"), posting.get("role"))
         if account is None:
             issues.append(
                 {
-                    "code": "unresolved_account",
-                    "message": f"postings[{index}]: unclassified",
+                    "code": "funding_unresolved" if role == "funding" else "unresolved_account",
+                    "message": (
+                        f'postings[{index}]: funding account "{posting.get("suggested") or ""}" is not open yet'
+                        if role == "funding"
+                        else f"postings[{index}]: unclassified"
+                    ),
                     "postingIndex": index,
                     "suggested": posting.get("suggested") or "",
                 }
@@ -305,6 +384,7 @@ def assess_draft(document: dict[str, Any], state: dict[str, Any], *, today: str)
                 {"code": "closed_account", "message": f"postings[{index}] is closed on the draft date", "postingIndex": index}
             )
     check_balanced(document.get("postings") or [], issues)
+    check_real_account(document.get("postings") or [], issues)
     if document["date"] > today:
         issues.append({"code": "future_dated", "message": f"draft date {document['date']} is in the future"})
     approvable = document.get("status") == "pending" and not any(
@@ -357,6 +437,9 @@ def is_draft_document(value: object) -> bool:
                 return False
             if not isinstance(item, str) or len(item) > MAX_METADATA_VALUE or CONTROL_RE.search(item):
                 return False
+    batch = value.get("batch")
+    if batch is not None and (not isinstance(batch, str) or BATCH_ID_RE.match(batch) is None):
+        return False
     postings = value.get("postings")
     if not isinstance(postings, list) or len(postings) < 2:
         return False
@@ -366,6 +449,12 @@ def is_draft_document(value: object) -> bool:
         if posting.get("account") is not None and not isinstance(posting.get("account"), str):
             return False
         if not isinstance(posting.get("amount"), str) or not isinstance(posting.get("currency"), str):
+            return False
+        role = posting.get("role")
+        if role is not None and role not in ROLES:
+            return False
+        fallback = posting.get("fallback")
+        if fallback is not None and fallback not in FALLBACKS:
             return False
     return True
 
@@ -436,6 +525,7 @@ class DraftStore:
         self.exclude_entries = exclude_entries or []
         self.state_directory = self.root / state_dir
         self.drafts_directory = self.state_directory / "drafts"
+        self.batches = BatchStore(root=self.root, state_dir=state_dir)
         self.audit_file = self.state_directory / "audit.jsonl"
         self.lock_file = self.state_directory / "write.lock"
         # Optional hooks set by BeancountGuard: a late draft that would break a
@@ -456,6 +546,84 @@ class DraftStore:
         with self.audit_file.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
+    def _ledger_uuid_location(self, state: dict[str, Any], uuid: str) -> dict[str, Any] | None:
+        """Find one uuid rendered in ledger metadata; the ledger is the source of truth."""
+        needle = f"uuid: {quote(uuid)}"
+        root = Path(state["root"]).resolve()
+        for file, content in state["contents"].items():
+            index = content.find(needle)
+            if index < 0:
+                continue
+            try:
+                rel_file = Path(file).resolve().relative_to(root).as_posix()
+            except ValueError:
+                rel_file = str(file)
+            return {"file": rel_file, "line": content[:index].count("\n") + 1}
+        return None
+
+    def _check_duplicate(
+        self,
+        state: dict[str, Any],
+        draft: dict[str, Any],
+        pending: list[dict[str, Any]],
+        seen_uuids: set[str],
+    ) -> tuple[str, dict[str, Any] | None]:
+        uuid = (draft.get("metadata") or {}).get("uuid") or ""
+        if uuid:
+            if uuid in seen_uuids:
+                fail(
+                    "duplicate_transaction",
+                    f'transaction uuid "{uuid}" appears more than once in this batch',
+                    {"uuid": uuid, "scope": "batch"},
+                )
+            location = self._ledger_uuid_location(state, uuid)
+            if location is not None:
+                fail(
+                    "duplicate_transaction",
+                    f'transaction uuid "{uuid}" already exists in the ledger',
+                    {"uuid": uuid, **location},
+                )
+        digest = hash_payload(draft)
+        if uuid:
+            for candidate in pending:
+                if (candidate.get("metadata") or {}).get("uuid") != uuid:
+                    continue
+                if candidate.get("hash") != digest:
+                    fail(
+                        "duplicate_transaction",
+                        f'a pending draft already uses uuid "{uuid}" with different content',
+                        {"uuid": uuid, "scope": "pending", "draftId": candidate.get("id")},
+                    )
+        previous = next((candidate for candidate in pending if candidate.get("hash") == digest), None)
+        return digest, previous
+
+    def _write_draft(
+        self,
+        draft: dict[str, Any],
+        issues: list[dict[str, Any]],
+        digest: str,
+        today: str,
+        batch_id: str | None,
+    ) -> dict[str, Any]:
+        self.ensure_directories()
+        draft_id = self.allocate_id(today)
+        timestamp = _now()
+        document = {
+            "id": draft_id,
+            "version": 1,
+            "status": "pending",
+            "hash": digest,
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            **draft,
+            "batch": batch_id,
+            "issues": issues,
+        }
+        atomic_write(self.draft_file(draft_id), json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+        self.audit("draft_submitted", {"id": draft_id, "hash": digest, "source": draft["source"]["kind"], "batch": batch_id})
+        approvable = not any(issue["code"] in BLOCKING_ISSUES for issue in issues)
+        return {**document, "approvable": approvable}
+
     def submit(self, payload: object) -> dict[str, Any]:
         with write_lock(self.lock_file):
             state = self.reader.refresh()
@@ -463,28 +631,108 @@ class DraftStore:
             draft, issues = normalize_draft_input(
                 payload, state, today=today, max_evidence_bytes=self.max_evidence_bytes
             )
-            digest = hash_payload(draft)
             pending = self.list(status="pending", limit=self.max_drafts)
-            previous = next((candidate for candidate in pending if candidate.get("hash") == digest), None)
+            digest, previous = self._check_duplicate(state, draft, pending, set())
             if previous is not None:
                 return {"draft": previous, "issues": previous.get("issues", []), "deduplicated": True}
-            self.ensure_directories()
-            draft_id = self.allocate_id(today)
-            timestamp = _now()
-            document = {
-                "id": draft_id,
+            document = self._write_draft(draft, issues, digest, today, None)
+            return {"draft": document, "issues": issues, "deduplicated": False}
+
+    def submit_batch(self, payload: object) -> dict[str, Any]:
+        """Submit one import batch; per-draft failures never abort the whole batch."""
+        if not isinstance(payload, dict):
+            fail("invalid_batch", "a batch must be a JSON object")
+        envelope = normalize_batch_envelope(payload)
+        raw_drafts = envelope.pop("drafts")
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            today = self.today()
+            batch_id = self.batches.allocate_id(today)
+            pending = self.list(status="pending", limit=self.max_drafts)
+            seen_uuids: set[str] = set()
+            items: list[dict[str, Any]] = []
+            draft_ids: list[str] = []
+            duplicates = 0
+            failed = 0
+            for index, raw in enumerate(raw_drafts):
+                try:
+                    draft, issues = normalize_draft_input(
+                        raw, state, today=today, max_evidence_bytes=self.max_evidence_bytes
+                    )
+                    if not (draft.get("source") or {}).get("ref"):
+                        draft["source"] = {
+                            "kind": envelope["source"]["kind"],
+                            "ref": envelope["source"]["ref"],
+                            "evidence": (draft.get("source") or {}).get("evidence"),
+                        }
+                    digest, previous = self._check_duplicate(state, draft, pending, seen_uuids)
+                    if previous is not None:
+                        duplicates += 1
+                        items.append(
+                            {
+                                "index": index,
+                                "ok": False,
+                                "code": "duplicate_pending",
+                                "message": f'draft {previous["id"]} already has the same content',
+                                "draftId": previous["id"],
+                            }
+                        )
+                        continue
+                    document = self._write_draft(draft, issues, digest, today, batch_id)
+                    uuid = (draft.get("metadata") or {}).get("uuid") or ""
+                    if uuid:
+                        seen_uuids.add(uuid)
+                    pending.append(document)
+                    draft_ids.append(document["id"])
+                    items.append(
+                        {
+                            "index": index,
+                            "ok": True,
+                            "draftId": document["id"],
+                            "issues": sorted({issue["code"] for issue in issues}),
+                        }
+                    )
+                except LedgerError as error:
+                    if error.code == "duplicate_transaction":
+                        duplicates += 1
+                    else:
+                        failed += 1
+                    items.append(
+                        {
+                            "index": index,
+                            "ok": False,
+                            "code": error.code,
+                            "message": error.message,
+                            "details": error.details,
+                        }
+                    )
+            manifest = {
+                "id": batch_id,
                 "version": 1,
-                "status": "pending",
-                "hash": digest,
-                "createdAt": timestamp,
-                "updatedAt": timestamp,
-                **draft,
-                "issues": issues,
+                "createdAt": _now(),
+                **envelope,
+                "draftIds": draft_ids,
+                "counts": {
+                    "drafts": len(draft_ids),
+                    "skipped": len(envelope["skipped"]),
+                    "duplicates": duplicates,
+                    "failed": failed,
+                },
+                "failures": [item for item in items if not item["ok"]],
             }
-            atomic_write(self.draft_file(draft_id), json.dumps(document, ensure_ascii=False, indent=2) + "\n")
-            self.audit("draft_submitted", {"id": draft_id, "hash": digest, "source": draft["source"]["kind"]})
-            approvable = not any(issue["code"] in BLOCKING_ISSUES for issue in issues)
-            return {"draft": {**document, "approvable": approvable}, "issues": issues, "deduplicated": False}
+            self.batches.save(manifest)
+            self.audit(
+                "batch_submitted",
+                {
+                    "id": batch_id,
+                    "source": envelope["source"]["ref"],
+                    "drafts": len(draft_ids),
+                    "skipped": len(envelope["skipped"]),
+                    "duplicates": duplicates,
+                    "failed": failed,
+                },
+            )
+            return {"batch": manifest, "items": items}
 
     def update(self, draft_id: str, payload: object, *, actor: str = "user") -> dict[str, Any]:
         """Update a pending draft in place and re-run validation."""
@@ -600,6 +848,14 @@ class DraftStore:
                     fail("unresolved_postings", "every posting must name a known account before approval")
                 if not has_account(state, posting["account"]):
                     fail("unresolved_postings", f"{posting['account']} is not open in the ledger")
+            if not any(
+                posting["account"].split(":", 1)[0] in {"Assets", "Liabilities"} for posting in normalized
+            ):
+                fail(
+                    "no_real_account",
+                    "a transaction needs at least one asset or liability posting",
+                    {"postings": [posting["account"] for posting in normalized]},
+                )
 
             block = render_transaction(
                 {
@@ -766,6 +1022,229 @@ class DraftStore:
             if touched:
                 self.audit("drafts_resolved", {"drafts": touched, "postings": resolved})
             return {"drafts": touched, "postings": resolved}
+
+    def batch_summaries(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List batches with counts, totals and touched funding accounts."""
+        manifests = self.batches.list(limit=limit)
+        if not manifests:
+            return []
+        documents = self.list(limit=self.max_drafts)
+        by_batch: dict[str, list[dict[str, Any]]] = {}
+        for document in documents:
+            batch_id = document.get("batch")
+            if isinstance(batch_id, str):
+                by_batch.setdefault(batch_id, []).append(document)
+        state = self.reader.refresh()
+        summaries = []
+        for manifest in manifests:
+            items = by_batch.get(manifest["id"], [])
+            counts = {"pending": 0, "approved": 0, "rejected": 0, "voided": 0}
+            expense = 0
+            credit = 0
+            income = 0
+            funding = 0
+            accounts: dict[str, str] = {}
+            for document in items:
+                status = document.get("status", "pending")
+                if document.get("voided"):
+                    counts["voided"] += 1
+                elif status in counts:
+                    counts[status] += 1
+                for posting in document.get("postings") or []:
+                    account = posting.get("account")
+                    if not isinstance(account, str):
+                        continue
+                    root = account.split(":", 1)[0]
+                    amount = to_scaled(posting.get("amount") or "0")
+                    if root == "Expenses":
+                        if amount >= 0:
+                            expense += amount
+                        else:
+                            credit += -amount
+                    elif root == "Income":
+                        income += -amount
+                    elif root in {"Assets", "Liabilities"}:
+                        funding += amount
+                        accounts[account] = project_name(state, account)
+            if manifest.get("voidedAt"):
+                status = "voided"
+            elif counts["pending"] > 0:
+                status = "pending"
+            elif counts["approved"] > 0:
+                status = "approved"
+            elif counts["rejected"] > 0:
+                status = "rejected"
+            else:
+                status = "empty"
+            source_rows = (manifest.get("source") or {}).get("rows")
+            manifest_counts = manifest.get("counts") or {}
+            covered = (
+                int(manifest_counts.get("drafts") or 0)
+                + int(manifest_counts.get("skipped") or 0)
+                + int(manifest_counts.get("duplicates") or 0)
+                + int(manifest_counts.get("failed") or 0)
+            )
+            manifest_skipped = manifest.get("skipped") or []
+            summaries.append(
+                {
+                    **manifest,
+                    "skipped": manifest_skipped[:200],
+                    "skippedCount": len(manifest_skipped),
+                    "status": status,
+                    "countsByStatus": counts,
+                    "totals": {
+                        "expense": from_scaled(expense),
+                        "credit": from_scaled(credit),
+                        "income": from_scaled(income),
+                        "funding": from_scaled(funding),
+                        "netOutflow": from_scaled(-funding),
+                    },
+                    "accounts": [
+                        {"account": account, "name": name}
+                        for account, name in sorted(accounts.items())
+                    ],
+                    "coverage": {
+                        "rows": source_rows,
+                        "covered": covered,
+                        "ok": None if source_rows is None else covered == source_rows,
+                    },
+                }
+            )
+        return summaries
+
+    def reject_batch(self, batch_id: str, *, reason: str = "", actor: str = "user") -> dict[str, Any]:
+        """Reject pending drafts of one batch; approved drafts are untouched."""
+        manifest = self.batches.read(batch_id)
+        reason_text = reason.strip()[:500] if isinstance(reason, str) else ""
+        with write_lock(self.lock_file):
+            documents = self.list(limit=self.max_drafts)
+            targets = [
+                document
+                for document in documents
+                if document.get("batch") == batch_id and document["status"] == "pending"
+            ]
+            for document in targets:
+                rejected = {
+                    **document,
+                    "status": "rejected",
+                    "updatedAt": _now(),
+                    "rejected": {"at": _now(), "reason": reason_text, "actor": actor},
+                }
+                atomic_write(self.draft_file(document["id"]), json.dumps(rejected, ensure_ascii=False, indent=2) + "\n")
+                self.audit("draft_rejected", {"id": document["id"], "reason": reason_text, "actor": actor, "batch": batch_id})
+            if targets:
+                manifest = {
+                    **manifest,
+                    "rejectedAt": _now(),
+                    "rejectReason": reason_text,
+                }
+                self.batches.save(manifest)
+            self.audit("batch_rejected", {"id": batch_id, "drafts": len(targets), "actor": actor})
+            return {"batch": manifest, "rejected": len(targets)}
+
+    def void_batch(self, batch_id: str, *, actor: str = "user") -> dict[str, Any]:
+        """Append reversing entries for every approved draft of one batch."""
+        manifest = self.batches.read(batch_id)
+        if manifest.get("voidedAt"):
+            fail("batch_already_voided", f"batch {batch_id} is already voided")
+        with write_lock(self.lock_file):
+            state = self.reader.refresh()
+            today = self.today()
+            documents = self.list(limit=self.max_drafts)
+            pending = [
+                document
+                for document in documents
+                if document.get("batch") == batch_id and document["status"] == "pending"
+            ]
+            if pending:
+                fail(
+                    "batch_has_pending",
+                    f"batch {batch_id} still has {len(pending)} pending drafts; reject them before voiding",
+                    {"batch": batch_id, "pending": len(pending)},
+                )
+            targets = [
+                document
+                for document in documents
+                if document.get("batch") == batch_id and document["status"] == "approved" and not document.get("voided")
+            ]
+            if not targets:
+                fail("batch_not_approved", f"batch {batch_id} has no approved drafts to void")
+            blocks: list[tuple[dict[str, Any], str]] = []
+            for document in sorted(targets, key=lambda item: item.get("date", "")):
+                postings = document.get("postings") or []
+                reversed_postings = []
+                for posting in postings:
+                    account = posting.get("account")
+                    if not isinstance(account, str):
+                        fail("draft_corrupt", f'draft {document["id"]} still has an unresolved posting')
+                    reversed_postings.append(
+                        {
+                            "account": account,
+                            "amount": from_scaled(-to_scaled(posting.get("amount") or "0")),
+                            "currency": posting.get("currency") or "CNY",
+                        }
+                    )
+                narration = f"冲销：{document.get('narration') or ''}"[:500]
+                block = render_transaction(
+                    {
+                        "date": today,
+                        "flag": "!",
+                        "payee": document.get("payee") or "",
+                        "narration": narration,
+                        "metadata": {"void_of": document["id"], "batch": batch_id},
+                        "tags": [],
+                        "links": [],
+                        "postings": reversed_postings,
+                    }
+                )
+                blocks.append((document, block))
+            target = resolve_append_target(self.root, "entries")
+            next_content = target["content"]
+            for _, block in blocks:
+                next_content = append_block(next_content, block)
+            lines: dict[str, int] = {}
+            cursor = 0
+            for document, block in blocks:
+                index = next_content.find(block, cursor)
+                lines[document["id"]] = next_content[:index].count("\n") + 1
+                cursor = index + len(block)
+            overrides = {target["rel_file"]: next_content}
+            if target["index_changed"]:
+                overrides[target["index_rel"]] = target["index_content"]
+            executable = self.bean_check() if callable(self.bean_check) else self.bean_check
+            validation = validate_ledger(
+                root=self.root,
+                main_file=self.reader.main_file,
+                executable=executable,
+                overrides=overrides,
+                timeout=self.timeout,
+                exclude=self.exclude_entries,
+            )
+            if not validation["ok"]:
+                fail(
+                    "bean_check_failed",
+                    f"the void was rejected by bean-check: {validation['diagnostic']}",
+                    {"diagnostic": validation["diagnostic"]},
+                )
+            atomic_write(target["file"], next_content)
+            if target["index_changed"]:
+                atomic_write(target["index_file"], target["index_content"])
+            for document, _ in blocks:
+                voided = {
+                    **document,
+                    "voided": {
+                        "at": _now(),
+                        "file": target["rel_file"],
+                        "line": lines[document["id"]],
+                        "actor": actor,
+                    },
+                }
+                atomic_write(self.draft_file(document["id"]), json.dumps(voided, ensure_ascii=False, indent=2) + "\n")
+            manifest = {**manifest, "voidedAt": _now(), "voidedBy": actor}
+            self.batches.save(manifest)
+            self.audit("batch_voided", {"id": batch_id, "entries": len(blocks), "actor": actor})
+            self.reader.invalidate()
+            return {"batch": manifest, "voided": len(blocks)}
 
     def allocate_id(self, today: str) -> str:
         self.ensure_directories()

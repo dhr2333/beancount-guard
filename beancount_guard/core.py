@@ -33,7 +33,7 @@ from .bean import (
     rewrite_open_metadata,
 )
 from .dates import is_date, is_period, iso, today_in_zone
-from .drafts import DraftStore, assess_draft
+from .drafts import DraftStore, assess_draft, infer_posting_role
 from .operations import OperationStore
 from .errors import LedgerError, fail
 from .ledger import (
@@ -894,6 +894,54 @@ class BeancountGuard:
                 failed.append({"id": draft["id"], "code": error.code, "message": error.message})
         return {"approved": len(done), "skipped": skipped, "failed": failed}
 
+    def submit_batch(self, payload: object) -> dict[str, Any]:
+        """Submit one import batch through the draft queue."""
+        return self.drafts.submit_batch(payload)
+
+    def list_batches(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        return self.drafts.batch_summaries(limit=limit)
+
+    def approve_batch(
+        self,
+        *,
+        batch: str | None = None,
+        ref: str | None = None,
+        actor: str = "user",
+    ) -> dict[str, Any]:
+        """Approve the pending drafts of one batch (or one legacy source.ref)."""
+        if not batch and not ref:
+            fail("invalid_argument", "pass batch or ref")
+        self.drafts.refresh_resolutions()
+        pending = [self.project_draft(item) for item in self.drafts.list(status="pending", limit=self.drafts.max_drafts)]
+        if batch:
+            selected = [item for item in pending if item.get("batch") == batch]
+        else:
+            selected = [item for item in pending if (item.get("source") or {}).get("ref") == ref]
+        ordered = sorted(selected, key=lambda item: (item.get("date", ""), item.get("createdAt", "")))
+        done: list[str] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for draft in ordered:
+            if not draft.get("approvable"):
+                skipped.append({
+                    "id": draft["id"],
+                    "payee": draft.get("payee") or draft.get("narration"),
+                    "issues": sorted({issue.get("code", "") for issue in draft.get("issues", [])}),
+                })
+                continue
+            try:
+                self.approve_draft(draft_id=draft["id"], actor=actor)
+                done.append(draft["id"])
+            except LedgerError as error:
+                failed.append({"id": draft["id"], "code": error.code, "message": error.message})
+        return {"approved": len(done), "skipped": skipped, "failed": failed, "batch": batch, "ref": ref}
+
+    def reject_batch(self, *, batch: str, reason: str = "", actor: str = "user") -> dict[str, Any]:
+        return self.drafts.reject_batch(batch, reason=reason, actor=actor)
+
+    def void_batch(self, *, batch: str, actor: str = "user") -> dict[str, Any]:
+        return self.drafts.void_batch(batch, actor=actor)
+
     # ------------------------------------------------------------------ proposal
 
     def match_merchant(self, text: str) -> list[dict[str, Any]]:
@@ -1004,14 +1052,23 @@ class BeancountGuard:
             "tags": document.get("tags", []),
             "links": document.get("links", []),
             "confidence": document.get("confidence"),
+            "batch": document.get("batch"),
             "source": {
                 "kind": (document.get("source") or {}).get("kind", "unknown"),
                 "ref": (document.get("source") or {}).get("ref", ""),
+                # Raw bill row (column -> value). Stored in full by the queue;
+                # the panel decides where to display it (currently the
+                # "only issues" review filter).
+                "evidence": (document.get("source") or {}).get("evidence"),
             },
             "postings": [
                 {
                     "account": None if posting.get("account") is None else project_name(state, posting["account"]),
                     "suggested": posting.get("suggested"),
+                    "role": infer_posting_role(
+                        posting.get("account"), posting.get("suggested"), posting.get("role")
+                    ),
+                    "fallback": posting.get("fallback"),
                     "amount": posting.get("amount"),
                     "currency": posting.get("currency"),
                 }
@@ -1025,6 +1082,7 @@ class BeancountGuard:
             "createdAt": document.get("createdAt"),
             "approved": document.get("approved"),
             "rejected": document.get("rejected"),
+            "voided": document.get("voided"),
         }
 
     def bootstrap(self) -> dict[str, Any]:
@@ -1087,4 +1145,5 @@ class BeancountGuard:
             "pendingOperations": self.list_operations(status="pending", limit=300),
             "operations": self.operations.summary(),
             "recentDrafts": recent,
+            "batches": self.list_batches(limit=20),
         }
