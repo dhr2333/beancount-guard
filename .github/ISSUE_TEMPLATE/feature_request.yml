@@ -1,28 +1,28 @@
-name: 功能请求
-description: 希望核心库支持的账本语义或写入能力
+name: Feature request
+description: Ledger semantics or write capabilities you want the core to support
 title: "[feat] "
 labels: ["type:feat"]
 body:
   - type: textarea
     id: scenario
     attributes:
-      label: 使用场景
-      description: 哪类账本操作现在做不到，或只能手工完成
+      label: Use case
+      description: Which ledger operation is impossible today, or only doable by hand
     validations:
       required: true
   - type: textarea
     id: expectation
     attributes:
-      label: 期望结果
-      placeholder: 描述语义与错误码层面的期望，不必设计实现
+      label: Expected result
+      placeholder: Describe the expected semantics and error codes; implementation design is not required
     validations:
       required: true
   - type: checkboxes
     id: boundary
     attributes:
-      label: 边界确认
+      label: Boundary check
       options:
-        - label: 该能力不要求绕过 bean-check 或 balance 断言
+        - label: This does not bypass bean-check or balance assertions
           required: true
-        - label: 该能力不要求核心直接解析账单文件（解析留在 Agent 侧）
+        - label: This does not ask the core to parse bank statements (parsing stays on the Agent side)
           required: true
