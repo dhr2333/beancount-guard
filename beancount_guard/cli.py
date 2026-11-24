@@ -114,6 +114,8 @@ def _build_parser() -> argparse.ArgumentParser:
     get_draft.add_argument("draft_id")
     commands.add_parser("submit-draft")
     commands.add_parser("submit-batch")
+    commands.add_parser("declare-sources")
+    commands.add_parser("import-status")
     list_batches = commands.add_parser("list-batches")
     list_batches.add_argument("--limit", type=int, default=50)
     approve_batch = commands.add_parser("approve-batch")
@@ -246,6 +248,10 @@ def _dispatch(args: argparse.Namespace, domain: BeancountGuard) -> Any:
     if command == "submit-batch":
         stored = domain.submit_batch(_read_payload())
         return {"batch": stored["batch"], "items": stored["items"]}
+    if command == "declare-sources":
+        return domain.declare_sources(_read_payload())
+    if command == "import-status":
+        return domain.import_status()
     if command == "list-batches":
         return {"batches": domain.list_batches(limit=args.limit)}
     if command == "approve-batch":

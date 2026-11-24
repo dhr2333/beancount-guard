@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .amounts import assert_amount, from_scaled, normalize_amount, to_scaled
-from .batches import BATCH_ID_RE, SOURCE_KINDS, BatchStore, normalize_batch_envelope
+from .batches import BATCH_ID_RE, SOURCE_KINDS, BatchStore, coverage_of, normalize_batch_envelope
 from .bean import (
     TAG_RE,
     append_block,
@@ -30,6 +30,7 @@ from .bean import (
 )
 from .dates import add_days, is_date, iso, today_in_zone
 from .errors import LedgerError, fail
+from .imports import SourceRegistry
 from .ledger import has_account, project_name, resolve_name
 from .target import resolve_append_target
 from .validation import atomic_write, validate_ledger, write_lock
@@ -40,11 +41,53 @@ FALLBACKS = {"expense", "income"}
 BLOCKING_ISSUES = {"unresolved_account", "funding_unresolved", "no_real_account", "unbalanced", "before_account_open", "closed_account"}
 ACCOUNT_ROOTS = {"Assets", "Liabilities", "Equity", "Income", "Expenses"}
 FUNDING_ROOTS = {"Assets", "Liabilities"}
+# Money can also enter or leave the ledger through the equity adjustment
+# account: reconciliation pads to it, and a person may book an entry against it
+# directly. It is an allowlist, not a sixth root — every other Equity account
+# stays a category.
+FUNDING_EXTRA_ACCOUNTS = {"Equity:Adjustments"}
 CONTROL_RE = re.compile(r"[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]")
 RESERVED_METADATA = {"draft_id"}
 MAX_METADATA_KEYS = 20
 MAX_METADATA_VALUE = 200
 DRAFT_METADATA_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+# Wallet accounts can only fund a row whose bill row actually says so. When the
+# bill names a bank card and the funding account is a wallet, one of the two is
+# wrong — this is exactly how a 43-draft batch ended up 35 rows on the wrong
+# account.
+WALLET_ACCOUNTS = {
+    "Assets:Savings:Web:WechatPay",
+    "Assets:Savings:Web:WechatFund",
+    "Assets:Savings:Web:AliPay",
+    "Assets:Savings:Web:AliFund",
+}
+BANK_WORDS = (
+    "中国银行", "招商银行", "中信银行", "华夏银行", "工商银行", "建设银行",
+    "农业银行", "交通银行", "邮政储蓄", "邮储", "民生银行", "浦发银行",
+    "兴业银行", "光大银行", "宁波银行", "广发银行", "平安银行",
+)
+CARD_DIGITS_RE = re.compile(r"\d{3,4}")
+
+
+def funding_mismatch(hint: object, account: object) -> str | None:
+    """Return why a bill's payment hint contradicts the resolved funding account."""
+    if not isinstance(hint, str) or not hint.strip():
+        return None
+    if not isinstance(account, str) or account not in WALLET_ACCOUNTS:
+        return None
+    text = hint.strip()
+    if CARD_DIGITS_RE.search(text) or any(word in text for word in BANK_WORDS):
+        return (
+            f'账单支付方式是「{text}」，资金账户却是钱包 {account}；'
+            "钱包只能用于账单明写余额/零钱/余额宝的行"
+        )
+    return None
+
+
+def is_funding_account(account: str) -> bool:
+    """True when the account is a money leg: an asset, a liability, or the adjustment account."""
+    return account in FUNDING_EXTRA_ACCOUNTS or account.split(":", 1)[0] in FUNDING_ROOTS
 
 
 def _now() -> str:
@@ -104,7 +147,7 @@ def infer_posting_role(account: str | None, suggested: str | None, explicit: obj
         if declared != "" and declared not in ROLES:
             fail("invalid_draft", f'"role" must be one of {", ".join(sorted(ROLES))}')
     if account is not None:
-        inferred = "funding" if account.split(":", 1)[0] in FUNDING_ROOTS else "category"
+        inferred = "funding" if is_funding_account(account) else "category"
         if declared != "" and declared != inferred:
             fail(
                 "invalid_draft",
@@ -113,7 +156,7 @@ def infer_posting_role(account: str | None, suggested: str | None, explicit: obj
             )
         return inferred
     if isinstance(suggested, str) and is_account_name(suggested):
-        return "funding" if suggested.split(":", 1)[0] in FUNDING_ROOTS else "category"
+        return "funding" if is_funding_account(suggested) else "category"
     return declared or "category"
 
 
@@ -165,6 +208,22 @@ def normalize_posting(
 
     role = infer_posting_role(account, suggested, posting.get("role"))
     fallback = normalize_fallback(posting.get("fallback"), role)
+    funding_hint = posting.get("fundingHint")
+    if funding_hint is not None and not isinstance(funding_hint, str):
+        fail("invalid_draft", f"postings[{index}].fundingHint must be a string")
+    funding_hint = funding_hint.strip()[:200] if isinstance(funding_hint, str) and funding_hint.strip() else None
+    if role == "funding":
+        mismatch = funding_mismatch(funding_hint, account)
+        if mismatch is not None:
+            issues.append(
+                {
+                    "code": "funding_mismatch",
+                    "message": f"postings[{index}]: {mismatch}",
+                    "postingIndex": index,
+                    "account": account,
+                    "hint": funding_hint,
+                }
+            )
 
     if account is None:
         if role == "funding":
@@ -212,6 +271,7 @@ def normalize_posting(
         "suggested": suggested,
         "role": role,
         "fallback": fallback,
+        "fundingHint": funding_hint,
         "amount": amount,
         "currency": currency,
     }
@@ -240,15 +300,15 @@ def check_balanced(postings: list[dict[str, Any]], issues: list[dict[str, Any]])
 
 
 def check_real_account(postings: list[dict[str, Any]], issues: list[dict[str, Any]]) -> None:
-    """A rendered transaction must move at least one real asset or liability."""
+    """A rendered transaction must move at least one real money account."""
     if any(posting.get("account") is None for posting in postings):
         return
-    if any((posting.get("account") or "").split(":", 1)[0] in FUNDING_ROOTS for posting in postings):
+    if any(is_funding_account(posting.get("account") or "") for posting in postings):
         return
     issues.append(
         {
             "code": "no_real_account",
-            "message": "the transaction has no asset or liability posting",
+            "message": "the transaction has no asset, liability or equity adjustment posting",
         }
     )
 
@@ -373,6 +433,18 @@ def assess_draft(document: dict[str, Any], state: dict[str, Any], *, today: str)
                 }
             )
             continue
+        if role == "funding":
+            mismatch = funding_mismatch(posting.get("fundingHint"), account)
+            if mismatch is not None:
+                issues.append(
+                    {
+                        "code": "funding_mismatch",
+                        "message": f"postings[{index}]: {mismatch}",
+                        "postingIndex": index,
+                        "account": account,
+                        "hint": posting.get("fundingHint"),
+                    }
+                )
         opened = state["opens"].get(account)
         if opened is not None and opened["date"] > document["date"]:
             issues.append(
@@ -526,6 +598,7 @@ class DraftStore:
         self.state_directory = self.root / state_dir
         self.drafts_directory = self.state_directory / "drafts"
         self.batches = BatchStore(root=self.root, state_dir=state_dir)
+        self.imports = SourceRegistry(root=self.root, state_dir=state_dir)
         self.audit_file = self.state_directory / "audit.jsonl"
         self.lock_file = self.state_directory / "write.lock"
         # Optional hooks set by BeancountGuard: a late draft that would break a
@@ -644,6 +717,7 @@ class DraftStore:
             fail("invalid_batch", "a batch must be a JSON object")
         envelope = normalize_batch_envelope(payload)
         raw_drafts = envelope.pop("drafts")
+        declared_drafts = len(raw_drafts)
         with write_lock(self.lock_file):
             state = self.reader.refresh()
             today = self.today()
@@ -665,6 +739,10 @@ class DraftStore:
                             "ref": envelope["source"]["ref"],
                             "evidence": (draft.get("source") or {}).get("evidence"),
                         }
+                    row_source = raw.get("source") if isinstance(raw, dict) else None
+                    row_index = row_source.get("index") if isinstance(row_source, dict) else None
+                    if isinstance(row_index, int) and not isinstance(row_index, bool):
+                        draft["source"]["index"] = row_index
                     digest, previous = self._check_duplicate(state, draft, pending, seen_uuids)
                     if previous is not None:
                         duplicates += 1
@@ -718,9 +796,22 @@ class DraftStore:
                     "duplicates": duplicates,
                     "failed": failed,
                 },
+                # Verified at submit time: every source row is owned by exactly one
+                # draft or one skipped entry, so this is a fact, not a guess.
+                "coverage": {
+                    "rows": envelope["source"]["rows"],
+                    "drafts": declared_drafts,
+                    "skipped": len(envelope["skipped"]),
+                    "duplicates": duplicates,
+                    "failed": failed,
+                    "covered": envelope["source"]["rows"],
+                    "verified": "row-index-set",
+                    "ok": True,
+                },
                 "failures": [item for item in items if not item["ok"]],
             }
             self.batches.save(manifest)
+            self.imports.mark_batched(envelope["source"].get("fileHash"), batch_id)
             self.audit(
                 "batch_submitted",
                 {
@@ -848,12 +939,10 @@ class DraftStore:
                     fail("unresolved_postings", "every posting must name a known account before approval")
                 if not has_account(state, posting["account"]):
                     fail("unresolved_postings", f"{posting['account']} is not open in the ledger")
-            if not any(
-                posting["account"].split(":", 1)[0] in {"Assets", "Liabilities"} for posting in normalized
-            ):
+            if not any(is_funding_account(posting["account"]) for posting in normalized):
                 fail(
                     "no_real_account",
-                    "a transaction needs at least one asset or liability posting",
+                    "a transaction needs at least one asset, liability or equity adjustment posting",
                     {"postings": [posting["account"] for posting in normalized]},
                 )
 
@@ -1063,7 +1152,7 @@ class DraftStore:
                             credit += -amount
                     elif root == "Income":
                         income += -amount
-                    elif root in {"Assets", "Liabilities"}:
+                    elif is_funding_account(account):
                         funding += amount
                         accounts[account] = project_name(state, account)
             if manifest.get("voidedAt"):
@@ -1076,14 +1165,6 @@ class DraftStore:
                 status = "rejected"
             else:
                 status = "empty"
-            source_rows = (manifest.get("source") or {}).get("rows")
-            manifest_counts = manifest.get("counts") or {}
-            covered = (
-                int(manifest_counts.get("drafts") or 0)
-                + int(manifest_counts.get("skipped") or 0)
-                + int(manifest_counts.get("duplicates") or 0)
-                + int(manifest_counts.get("failed") or 0)
-            )
             manifest_skipped = manifest.get("skipped") or []
             summaries.append(
                 {
@@ -1103,11 +1184,7 @@ class DraftStore:
                         {"account": account, "name": name}
                         for account, name in sorted(accounts.items())
                     ],
-                    "coverage": {
-                        "rows": source_rows,
-                        "covered": covered,
-                        "ok": None if source_rows is None else covered == source_rows,
-                    },
+                    "coverage": coverage_of(manifest),
                 }
             )
         return summaries

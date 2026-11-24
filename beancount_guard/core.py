@@ -898,6 +898,14 @@ class BeancountGuard:
         """Submit one import batch through the draft queue."""
         return self.drafts.submit_batch(payload)
 
+    def declare_sources(self, payload: object) -> dict[str, Any]:
+        """Declare the attachments of one import session and report what is left."""
+        return self.drafts.imports.declare(payload)
+
+    def import_status(self) -> dict[str, Any]:
+        """Report which declared sources still have no batch."""
+        return self.drafts.imports.status()
+
     def list_batches(self, *, limit: int = 50) -> list[dict[str, Any]]:
         return self.drafts.batch_summaries(limit=limit)
 
@@ -1060,6 +1068,9 @@ class BeancountGuard:
                 # the panel decides where to display it (currently the
                 # "only issues" review filter).
                 "evidence": (document.get("source") or {}).get("evidence"),
+                # Which source row this draft owns; the batch coverage check is
+                # built on it, so the panel can show the mapping too.
+                "index": (document.get("source") or {}).get("index"),
             },
             "postings": [
                 {
@@ -1069,6 +1080,7 @@ class BeancountGuard:
                         posting.get("account"), posting.get("suggested"), posting.get("role")
                     ),
                     "fallback": posting.get("fallback"),
+                    "fundingHint": posting.get("fundingHint"),
                     "amount": posting.get("amount"),
                     "currency": posting.get("currency"),
                 }

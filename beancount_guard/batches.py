@@ -31,6 +31,20 @@ MAX_BATCH_DRAFTS = 200
 MAX_SKIPPED = 5000
 MAX_ROWS = 20000
 
+# Every skipped row must say *why* in a closed vocabulary. Free text is kept as a
+# human note, but it never decides anything: a reason nobody can enumerate is a
+# reason nobody can check.
+REASON_CODES = {
+    "closed": "订单关闭或未支付，没有资金变动",
+    "exact_refund": "等额原路退回；必须给出 refundOf 或 refundOfUuid",
+    "zero_amount": "金额为 0，没有实际支出",
+    "internal_transfer": "本人资金账户之间划转",
+    "interest": "利息或收益，随余额对账处理",
+    "duplicate_source": "与其他批次同一笔；必须给出 duplicateOf",
+}
+REASONS_NEEDING_REFUND = {"exact_refund"}
+REASONS_NEEDING_AMOUNT_ZERO = {"zero_amount"}
+
 
 def _text(value: object, label: str, *, maximum: int = 200, allow_empty: bool = True) -> str:
     if value is None:
@@ -45,8 +59,23 @@ def _text(value: object, label: str, *, maximum: int = 200, allow_empty: bool = 
     return text
 
 
+def _row_index(value: object, label: str, rows: int) -> int:
+    """Validate one 0-based source row index against the declared row count."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        fail("invalid_batch", f"{label} must be a non-negative integer")
+    if value >= rows:
+        fail("row_index_out_of_range", f"{label} is {value} but the source has {rows} rows", {"rows": rows, "index": value})
+    return value
+
+
 def normalize_batch_envelope(payload: object) -> dict[str, Any]:
-    """Validate the agent-supplied envelope (everything except the drafts)."""
+    """Validate the agent-supplied envelope (everything except the drafts).
+
+    Coverage is a bijection, not a sum: every source row must be claimed by
+    exactly one draft or one skipped entry. Counting alone is what let a
+    duplicated ``skipped.index`` hide a missing row, so duplicates, out-of-range
+    indices and unexplained rows are rejected before anything is written.
+    """
     if not isinstance(payload, dict):
         fail("invalid_batch", "a batch must be a JSON object")
     source = payload.get("source")
@@ -57,23 +86,41 @@ def normalize_batch_envelope(payload: object) -> dict[str, Any]:
         fail("invalid_batch", f'source.kind must be one of {", ".join(sorted(SOURCE_KINDS))}')
     ref = _text(source.get("ref"), "source.ref", maximum=200, allow_empty=False)
     rows = source.get("rows")
-    if rows is not None:
-        if not isinstance(rows, int) or isinstance(rows, bool) or rows < 0 or rows > MAX_ROWS:
-            fail("invalid_batch", f"source.rows must be an integer between 0 and {MAX_ROWS}")
+    if rows is None:
+        fail(
+            "missing_source_rows",
+            "source.rows is required: coverage cannot be verified without the number of source rows",
+        )
+    if not isinstance(rows, int) or isinstance(rows, bool) or rows < 0 or rows > MAX_ROWS:
+        fail("invalid_batch", f"source.rows must be an integer between 0 and {MAX_ROWS}")
     skipped = payload.get("skipped")
     if skipped is None:
         skipped = []
     if not isinstance(skipped, list) or len(skipped) > MAX_SKIPPED:
         fail("invalid_batch", f"skipped must be an array of at most {MAX_SKIPPED} entries")
     cleaned_skipped: list[dict[str, Any]] = []
+    claimed_rows: dict[int, str] = {}
     for index, item in enumerate(skipped):
         if not isinstance(item, dict):
             fail("invalid_batch", f"skipped[{index}] must be an object")
-        position = item.get("index")
-        if not isinstance(position, int) or isinstance(position, bool) or position < 0:
-            fail("invalid_batch", f"skipped[{index}].index must be a non-negative integer")
-        reason = _text(item.get("reason"), f"skipped[{index}].reason", maximum=100, allow_empty=False)
+        position = _row_index(item.get("index"), f"skipped[{index}].index", rows)
+        if position in claimed_rows:
+            fail(
+                "row_index_duplicate",
+                f'row {position} is declared twice in skipped (also by skipped[{claimed_rows[position]}])',
+                {"index": position, "first": claimed_rows[position], "second": index},
+            )
+        code = _text(item.get("reasonCode"), f"skipped[{index}].reasonCode", maximum=40)
+        if code and code not in REASON_CODES:
+            fail(
+                "invalid_reason_code",
+                f'skipped[{index}].reasonCode must be one of {", ".join(sorted(REASON_CODES))}',
+                {"code": code, "supported": sorted(REASON_CODES)},
+            )
+        reason = _text(item.get("reason"), f"skipped[{index}].reason", maximum=100, allow_empty=bool(code))
         entry: dict[str, Any] = {"index": position, "reason": reason}
+        if code:
+            entry["reasonCode"] = code
         when = _text(item.get("date"), f"skipped[{index}].date", maximum=10)
         if when:
             if not is_date(when):
@@ -85,6 +132,30 @@ def normalize_batch_envelope(payload: object) -> dict[str, Any]:
         amount = _text(item.get("amount"), f"skipped[{index}].amount", maximum=40)
         if amount:
             entry["amount"] = normalize_amount(assert_amount(amount, f"skipped[{index}].amount"))
+        if code in REASONS_NEEDING_AMOUNT_ZERO and amount and entry["amount"] != "0.00":
+            fail(
+                "zero_amount_mismatch",
+                f"skipped[{index}] claims zero_amount but carries {entry['amount']}",
+                {"index": position, "amount": entry["amount"]},
+            )
+        refund_of = item.get("refundOf")
+        if refund_of is not None:
+            entry["refundOf"] = _row_index(refund_of, f"skipped[{index}].refundOf", rows)
+        refund_uuid = _text(item.get("refundOfUuid"), f"skipped[{index}].refundOfUuid", maximum=120)
+        if refund_uuid:
+            entry["refundOfUuid"] = refund_uuid
+        if code in REASONS_NEEDING_REFUND and "refundOf" not in entry and "refundOfUuid" not in entry:
+            fail(
+                "refund_pair_missing",
+                f"skipped[{index}] is exact_refund but names neither refundOf nor refundOfUuid",
+                {"index": position},
+            )
+        duplicate_of = _text(item.get("duplicateOf"), f"skipped[{index}].duplicateOf", maximum=200)
+        if duplicate_of:
+            entry["duplicateOf"] = duplicate_of
+        elif code == "duplicate_source":
+            fail("invalid_batch", f"skipped[{index}] is duplicate_source but names no duplicateOf", {"index": position})
+        claimed_rows[position] = index
         cleaned_skipped.append(entry)
 
     claimed = payload.get("claimed")
@@ -107,6 +178,48 @@ def normalize_batch_envelope(payload: object) -> dict[str, Any]:
     if not drafts and not cleaned_skipped:
         fail("empty_batch", "a batch needs at least one draft or one skipped row")
 
+    draft_rows: dict[int, int] = {}
+    for index, draft in enumerate(drafts):
+        if not isinstance(draft, dict):
+            fail("invalid_batch", f"drafts[{index}] must be an object")
+        raw_source = draft.get("source")
+        position = raw_source.get("index") if isinstance(raw_source, dict) else None
+        if position is None:
+            fail(
+                "missing_source_index",
+                f"drafts[{index}].source.index is required: every source row needs one owner "
+                f"(a draft or a skipped entry) for coverage to be verifiable",
+                {"draft": index, "rows": rows, "taken": sorted(claimed_rows)},
+            )
+        position = _row_index(position, f"drafts[{index}].source.index", rows)
+        if position in claimed_rows:
+            fail(
+                "row_index_conflict",
+                f'row {position} is both drafts[{index}] and skipped[{claimed_rows[position]}]',
+                {"index": position, "skipped": claimed_rows[position], "draft": index},
+            )
+        if position in draft_rows:
+            fail(
+                "row_index_duplicate",
+                f"row {position} is claimed by both drafts[{draft_rows[position]}] and drafts[{index}]",
+                {"index": position, "first": draft_rows[position], "second": index},
+            )
+        draft_rows[position] = index
+
+    missing = sorted(set(range(rows)) - set(claimed_rows) - set(draft_rows))
+    if missing:
+        fail(
+            "rows_uncovered",
+            f"{len(missing)} of {rows} source rows have no draft and no skipped entry",
+            {
+                "rows": rows,
+                "missing": missing[:100],
+                "missingCount": len(missing),
+                "drafts": len(drafts),
+                "skipped": len(cleaned_skipped),
+            },
+        )
+
     return {
         "source": {
             "kind": kind,
@@ -119,6 +232,35 @@ def normalize_batch_envelope(payload: object) -> dict[str, Any]:
         "claimed": normalized_claimed,
         "skipped": cleaned_skipped,
         "drafts": drafts,
+    }
+
+
+def coverage_of(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Derive the coverage block shown in the panel.
+
+    New manifests are verified at submit time, so ``ok`` is simply true. Legacy
+    manifests (no ``rows``, or rows declared without per-row indices) fall back to
+    the historical counting rule, which stays ``None`` when rows is unknown.
+    """
+    source_rows = (manifest.get("source") or {}).get("rows")
+    counts = manifest.get("counts") or {}
+    stored = manifest.get("coverage")
+    if isinstance(stored, dict) and "ok" in stored:
+        return {"covered": (manifest.get("source") or {}).get("rows"), **stored}
+    covered = (
+        int(counts.get("drafts") or 0)
+        + int(counts.get("skipped") or 0)
+        + int(counts.get("duplicates") or 0)
+        + int(counts.get("failed") or 0)
+    )
+    return {
+        "rows": source_rows,
+        "drafts": int(counts.get("drafts") or 0),
+        "skipped": int(counts.get("skipped") or 0),
+        "duplicates": int(counts.get("duplicates") or 0),
+        "failed": int(counts.get("failed") or 0),
+        "covered": covered,
+        "ok": None if source_rows is None else covered == source_rows,
     }
 
 

@@ -8,6 +8,10 @@ The design baseline is v0.26. This repository now implements:
 - draft `update-draft`;
 - optional draft `metadata` (0.1.2), rendered into the approved transaction before `draft_id` and postings; this is an explicit user-requested exception to the feature freeze;
 - import batches (unreleased): `submit-batch`, `list-batches`, `approve-batch`, `reject-batch`, `void-batch`; a batch envelope stores the claimed row count, skipped rows and draft ids under `.ledger/batches/`;
+- batch coverage is a row-index bijection, not a sum: `source.rows` and every `drafts[].source.index` are required, and `drafts[].source.index` + `skipped[].index` must cover `0..rows-1` exactly once (`row_index_duplicate`, `row_index_out_of_range`, `row_index_conflict`, `rows_uncovered`, `missing_source_index`, `missing_source_rows`);
+- `skipped[].reasonCode` is a closed set (`closed`, `exact_refund`, `zero_amount`, `internal_transfer`, `interest`, `duplicate_source`); `exact_refund` needs `refundOf` / `refundOfUuid`, `zero_amount` needs `amount: "0.00"`, `duplicate_source` needs `duplicateOf`;
+- funding postings carry an optional `fundingHint` (the bill payment-method text); a wallet account funded against a bill naming a bank card raises a non-blocking `funding_mismatch`;
+- declared import sources (unreleased): `declare-sources`, `import-status`; the attachment inventory lives under `.ledger/imports/sources.json` and reports sources that still have no batch;
 - posting `role` (`category` / `funding`) and `fallback` (`expense` / `income`), with `funding_unresolved` blocking approval and a `no_real_account` invariant at approval;
 - `metadata.uuid` idempotency checked against rendered ledger metadata, not only the pending queue; same-batch and pending-uuid conflicts are rejected;
 - batch void appends reversing entries in one shadow-validated write; it never deletes or rewrites history;

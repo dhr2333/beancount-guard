@@ -198,7 +198,7 @@ stdout is always one of:
 {"ok": false, "error": {"code": "...", "message": "...", "details": {}}}
 ```
 
-Business failures still exit `0`; usage or internal errors exit `1`. Commands: `health`, `setup`, `init`, `bootstrap`, `status`, `accounts`, `resolve`, `due`, `metadata`, `account-open`, `account-redate`, `balance`, `reconcile-preview`, `reconcile-commit`, `reconcile-history`, `refresh-drafts`, `approve-all-drafts`, `op-submit`, `op-list`, `op-get`, `op-approve`, `op-approve-all`, `op-reject`, `list-drafts`, `get-draft`, `submit-draft`, `submit-batch`, `list-batches`, `approve-batch`, `reject-batch`, `void-batch`, `update-draft`, `approve-draft`, `reject-draft`, `quick-draft`, `query-transactions`, `query-balances`, `validate`, `audit-metadata`.
+Business failures still exit `0`; usage or internal errors exit `1`. Commands: `health`, `setup`, `init`, `bootstrap`, `status`, `accounts`, `resolve`, `due`, `metadata`, `account-open`, `account-redate`, `balance`, `reconcile-preview`, `reconcile-commit`, `reconcile-history`, `refresh-drafts`, `approve-all-drafts`, `op-submit`, `op-list`, `op-get`, `op-approve`, `op-approve-all`, `op-reject`, `list-drafts`, `get-draft`, `submit-draft`, `submit-batch`, `declare-sources`, `import-status`, `list-batches`, `approve-batch`, `reject-batch`, `void-batch`, `update-draft`, `approve-draft`, `reject-draft`, `quick-draft`, `query-transactions`, `query-balances`, `validate`, `audit-metadata`.
 
 ## Runtime
 
